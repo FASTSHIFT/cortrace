@@ -1,0 +1,7 @@
+# Cortrace C++ style — WebKit base.
+# Regenerate defaults with: clang-format --style=WebKit --dump-config
+BasedOnStyle: WebKit
+Language: Cpp
+Standard: c++17
+ColumnLimit: 100
+PointerAlignment: Left

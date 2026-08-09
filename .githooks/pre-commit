@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Cortrace pre-commit hook: enforce clang-format on staged C/C++ files.
+# Blocks the commit if any staged source is not formatted per .clang-format.
+#
+# Install with: scripts/install-hooks.sh  (sets core.hooksPath to .githooks)
+set -euo pipefail
+
+CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
+if ! command -v "$CLANG_FORMAT" >/dev/null 2>&1; then
+    echo "pre-commit: $CLANG_FORMAT not found; skipping format check" >&2
+    exit 0
+fi
+
+# staged files matching our source globs
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '^(include|src|tests|tools)/.*\.(cpp|hpp|h|cc)$' || true)
+
+if [[ ${#STAGED[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+fail=0
+for f in "${STAGED[@]}"; do
+    [[ -f "$f" ]] || continue
+    if ! diff -q <("$CLANG_FORMAT" --style=file "$f") "$f" >/dev/null; then
+        echo "pre-commit: needs formatting -> $f"
+        fail=1
+    fi
+done
+
+if [[ $fail -ne 0 ]]; then
+    echo "" >&2
+    echo "commit blocked: fix formatting with 'scripts/format.sh' then re-stage." >&2
+    exit 1
+fi

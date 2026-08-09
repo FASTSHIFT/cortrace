@@ -1,0 +1,74 @@
+# Cortrace
+
+**Cortrace** 把 ARM CoreSight ETM trace 原始字节流转换成函数级
+[Perfetto](https://ui.perfetto.dev) 时间线。它用 ARM/Linaro 官方参考解码器
+[OpenCSD](https://github.com/Linaro/OpenCSD) 解码，重建调用栈，并（规划中）
+一键推送到 Perfetto 网页端。
+
+> 设计理念与路线图见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+## 为什么
+
+其他项目使用的精简 ETMv4 解码器在采集质量边际时会出错：遇到损坏字节就带着过时的 PC
+继续行走，捏造多达约 4.6 倍的真实指令数和数百次假函数重入。OpenCSD 对同一条流处理正确，
+并把无法解码的区段如实标记，而不是编造程序流。Cortrace 把最难的 ETM 解码外包给 OpenCSD，
+只拥有其上确定性的层——调用栈重建、时间基对齐、Perfetto 导出。
+
+原型已产出与 ELF **逐条调用边完全一致（0 mismatch）** 的调用图，且嵌套配平。
+
+## 构建
+
+需要 CMake ≥ 3.16、C++17 编译器，以及（可选）`libopencsd-dev` 用于解码器适配层。
+核心库 + 测试在没有 OpenCSD 时也能构建。
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+## 覆盖率
+
+```sh
+cmake -S . -B build -DENABLE_COVERAGE=ON
+cmake --build build --target coverage   # 跑测试 + gcovr，低于门禁则失败
+```
+
+门禁阈值用 `-DCORTRACE_MIN_COVERAGE=<百分比>`（默认 80）。HTML 报告在
+`build/coverage-html/`。
+
+## 代码格式化
+
+基于 WebKit 的 clang-format（见 `.clang-format`）。
+
+```sh
+scripts/format.sh          # 原地格式化
+scripts/format.sh --check  # CI 模式：有差异则失败
+```
+
+## Git 钩子
+
+在每次提交时强制格式检查：
+
+```sh
+scripts/install-hooks.sh   # 设置 core.hooksPath = .githooks
+```
+
+`pre-commit` 钩子会在任何已暂存的 C/C++ 源码不符合 `.clang-format` 时**阻止提交**。
+
+## 目录结构
+
+```
+include/cortrace/   公共头文件（element / symbols / callstack …）
+src/                核心实现（不依赖 OpenCSD）
+tests/              零依赖单元测试 + 框架
+cmake/              CodeCoverage.cmake（gcovr + 门禁）
+scripts/            format.sh, install-hooks.sh
+.githooks/          pre-commit（格式门禁）
+.github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率门禁）
+docs/               ARCHITECTURE.md
+```
+
+## 许可证
+
+MIT © 2026 VIFEX
