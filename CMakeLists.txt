@@ -21,7 +21,9 @@ enable_coverage_if_requested()
 # NO OpenCSD dependency so it is fully unit-testable with synthetic elements.
 add_library(cortrace_core
     src/symbols.cpp
-    src/callstack.cpp)
+    src/callstack.cpp
+    src/perfetto_writer.cpp
+    src/timebase.cpp)
 target_include_directories(cortrace_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 # ---- optional OpenCSD-backed decoder adapter ------------------------------
