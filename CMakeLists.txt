@@ -29,17 +29,25 @@ target_include_directories(cortrace_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 find_library(OPENCSD_LIB opencsd)
 find_library(OPENCSD_C_API_LIB opencsd_c_api)
 find_path(OPENCSD_INCLUDE_DIR opencsd/c_api/opencsd_c_api.h)
+set(CORTRACE_HAVE_OPENCSD OFF)
 if(OPENCSD_LIB AND OPENCSD_C_API_LIB AND OPENCSD_INCLUDE_DIR)
     message(STATUS "OpenCSD found: building decoder adapter")
-    # src/opencsd_decoder.cpp will land here in M1; guard keeps M0 green.
     if(EXISTS ${CMAKE_SOURCE_DIR}/src/opencsd_decoder.cpp)
         target_sources(cortrace_core PRIVATE src/opencsd_decoder.cpp)
-        target_include_directories(cortrace_core PRIVATE ${OPENCSD_INCLUDE_DIR})
-        target_link_libraries(cortrace_core PRIVATE ${OPENCSD_C_API_LIB} ${OPENCSD_LIB})
+        # PUBLIC so tools linking cortrace_core see the OpenCSD headers/macro.
+        target_include_directories(cortrace_core PUBLIC ${OPENCSD_INCLUDE_DIR})
+        target_link_libraries(cortrace_core PUBLIC ${OPENCSD_C_API_LIB} ${OPENCSD_LIB})
         target_compile_definitions(cortrace_core PUBLIC CORTRACE_HAVE_OPENCSD=1)
+        set(CORTRACE_HAVE_OPENCSD ON)
     endif()
 else()
     message(STATUS "OpenCSD not found: core-only build (decoder adapter skipped)")
+endif()
+
+# ---- CLI front end (needs the OpenCSD-backed decoder) ---------------------
+if(CORTRACE_HAVE_OPENCSD)
+    add_executable(cortrace-decode tools/cortrace_decode.cpp)
+    target_link_libraries(cortrace-decode PRIVATE cortrace_core)
 endif()
 
 # ---- tests ----------------------------------------------------------------

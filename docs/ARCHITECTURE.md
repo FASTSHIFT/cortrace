@@ -162,7 +162,7 @@ Cortrace 把 trace 的**可信度**当作输出，而非脚注：
 ```mermaid
 flowchart LR
     M0["M0 当前脚手架<br>解码基础 加 Element 模型<br>CI 加 单测加覆盖率门禁<br>clang-format WebKit 加 pre-commit"]
-    M1["M1<br>调用栈机对齐原型<br>0-mismatch 边 加 SysTick 加 盲区率<br>golden 回归 fixtures"]
+    M1["M1 进行中<br>OpenCSD 适配层 加 cortrace-decode CLI<br>0-mismatch 边 加 SysTick 已跑通<br>golden 回归 fixtures 待补"]
     M2["M2<br>真 protobuf Perfetto 写出<br>加 FPGA 时间基对齐"]
     M3["M3<br>Perfetto UI 桥<br>window.open 加 postMessage 深链<br>一键 免文件拷贝"]
     M4["M4<br>流式数据源 加 滑动窗口环形 buffer<br>长时抓 任意时间窗按需送 UI"]

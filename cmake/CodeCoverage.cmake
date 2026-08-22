@@ -41,6 +41,10 @@ function(add_coverage_target test_target min_percent)
                 --filter "${CMAKE_SOURCE_DIR}/src/.*"
                 --exclude ".*/tests/.*"
                 --exclude ".*/tools/.*"
+                # OpenCSD adapter is an external-library integration boundary,
+                # exercised by the CLI / integration tests (needs a live
+                # decoder), not by the synthetic-element unit tests.
+                --exclude ".*/src/opencsd_decoder.cpp"
                 --xml ${CMAKE_BINARY_DIR}/coverage.xml
                 --html-details ${_html_dir}/index.html
                 --print-summary

@@ -15,17 +15,32 @@
 只拥有其上确定性的层——调用栈重建、时间基对齐、Perfetto 导出。
 
 原型已产出与 ELF **逐条调用边完全一致（0 mismatch）** 的调用图，且嵌套配平。
+当前 `cortrace-decode` CLI 已跑通完整离线链路（OpenCSD 真链库 → 调用栈机），在 CoreMark
+slice 上复现该结果：**11/11 调用边对 ELF、0 mismatch、begin/end 配平、14 个 SysTick 渲染**。
 
 ## 构建
 
 需要 CMake ≥ 3.16、C++17 编译器，以及（可选）`libopencsd-dev` 用于解码器适配层。
-核心库 + 测试在没有 OpenCSD 时也能构建。
+核心库 + 测试在没有 OpenCSD 时也能构建；装了 OpenCSD 时额外产出 `cortrace-decode` CLI。
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+## 离线解码（cortrace-decode）
+
+在已 deframe 的 ETMv4 字节流上跑完整链路，报告质量指标（配平、调用边）。
+`mem.bin` 是 ELF 的扁平镜像，`mem_base` 是其最低 LMA（STM32H743 一般是 `08000000`）。
+
+```sh
+arm-none-eabi-objcopy -O binary fw.elf mem.bin      # 扁平镜像
+arm-none-eabi-nm fw.elf > syms.nm                   # 符号表
+build/cortrace-decode capture.etm.bin mem.bin 08000000 syms.nm --edges edges.tsv
+```
+
+判据：`begins == ends`（配平）、`edges.tsv` 每条边都对应 ELF 里真实的 `bl`（0 mismatch）。
 
 ## 覆盖率
 
