@@ -243,7 +243,7 @@ int main(int argc, char** argv)
     // ---- outputs -----------------------------------------------------------
     if (perf_path) {
         const auto timed = apply_timebase(machine.slices(), tb);
-        if (!write_perfetto_trace(perf_path, timed)) {
+        if (!write_perfetto_trace_multi(perf_path, timed, machine.tracks())) {
             std::fprintf(stderr, "error: cannot write perf to %s\n", perf_path);
             return 1;
         }

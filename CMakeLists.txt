@@ -19,11 +19,13 @@ enable_coverage_if_requested()
 # ---- core library ---------------------------------------------------------
 # The decoder-facing core: symbol table + call-stack machine. Deliberately has
 # NO OpenCSD dependency so it is fully unit-testable with synthetic elements.
-add_library(cortrace_core
-    src/symbols.cpp
-    src/callstack.cpp
-    src/perfetto_writer.cpp
-    src/timebase.cpp)
+#
+# Sources are auto-collected: drop a new .cpp in src/ and it is picked up on the
+# next build (CONFIGURE_DEPENDS re-runs CMake when the set changes). The OpenCSD
+# adapter is excluded here and added conditionally below (it needs libopencsd).
+file(GLOB CORTRACE_CORE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
+list(REMOVE_ITEM CORTRACE_CORE_SRC ${CMAKE_SOURCE_DIR}/src/opencsd_decoder.cpp)
+add_library(cortrace_core ${CORTRACE_CORE_SRC})
 target_include_directories(cortrace_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 # ---- optional OpenCSD-backed decoder adapter ------------------------------
@@ -47,17 +49,22 @@ else()
 endif()
 
 # ---- CLI front end (needs the OpenCSD-backed decoder) ---------------------
+# Auto-collect every CLI in tools/ (one executable per .cpp).
 if(CORTRACE_HAVE_OPENCSD)
-    add_executable(cortrace-decode tools/cortrace_decode.cpp)
-    target_link_libraries(cortrace-decode PRIVATE cortrace_core)
+    file(GLOB CORTRACE_TOOLS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/*.cpp)
+    foreach(tool_src ${CORTRACE_TOOLS})
+        get_filename_component(tool_name ${tool_src} NAME_WE)
+        string(REPLACE "_" "-" tool_name ${tool_name})
+        add_executable(${tool_name} ${tool_src})
+        target_link_libraries(${tool_name} PRIVATE cortrace_core)
+    endforeach()
 endif()
 
 # ---- tests ----------------------------------------------------------------
+# Auto-collect every test_*.cpp in tests/ (test_main.cpp provides main()).
 enable_testing()
-add_executable(cortrace_tests
-    tests/test_main.cpp
-    tests/test_symbols.cpp
-    tests/test_callstack.cpp)
+file(GLOB CORTRACE_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+add_executable(cortrace_tests ${CORTRACE_TEST_SRC})
 target_link_libraries(cortrace_tests PRIVATE cortrace_core)
 target_include_directories(cortrace_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME unit COMMAND cortrace_tests)

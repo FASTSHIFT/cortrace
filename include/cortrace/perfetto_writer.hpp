@@ -14,6 +14,7 @@
 #include "cortrace/callstack.hpp"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,16 @@ std::string encode_perfetto_trace(const std::vector<SliceEvent>& slices,
 // Convenience: encode and write to `path`. Returns false on write failure.
 bool write_perfetto_trace(const std::string& path, const std::vector<SliceEvent>& slices,
     const std::string& track_name = "ETM callstack", uint64_t track_uuid = 0x1001);
+
+// Multi-track variant: each SliceEvent.track is emitted on its own Perfetto
+// track. `tracks` maps track id -> display name (e.g. 0="main thread",
+// 1="IRQ:SysTick"). One TrackDescriptor is emitted per entry; each track's
+// events go on a distinct track_uuid so ISRs appear as separate swim-lanes.
+std::string encode_perfetto_trace_multi(
+    const std::vector<SliceEvent>& slices, const std::map<int, std::string>& tracks);
+
+bool write_perfetto_trace_multi(const std::string& path, const std::vector<SliceEvent>& slices,
+    const std::map<int, std::string>& tracks);
 
 } // namespace cortrace
 

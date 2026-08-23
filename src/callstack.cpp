@@ -4,6 +4,12 @@
 // proof of concept: call graph matched the ELF edge-for-edge (0 mismatch) with
 // balanced nesting on an offline CoreMark slice.
 //
+// Multi-track model: the main thread runs on track 0; each exception (keyed by
+// exception number) runs on its OWN Perfetto track, so ISRs appear as separate
+// swim-lanes instead of nesting on the function they preempted. Contexts stack
+// (a higher-priority IRQ can preempt an ISR), mirroring Cortex-M exception
+// preemption.
+//
 // SPDX-License-Identifier: MIT
 #include "cortrace/callstack.hpp"
 
@@ -39,40 +45,63 @@ static bool is_self_recursive(const std::string&) { return false; }
 CallStackMachine::CallStackMachine(const SymbolTable& syms)
     : syms_(syms)
 {
-    // Seed a root frame so an early return does not underflow.
-    stack_.push_back({ "<root>", 0 });
+    // Context 0 = main thread on track 0, seeded with a root frame so an early
+    // return does not underflow.
+    track_names_[0] = "main thread";
+    ctx_.push_back({ 0, { { "<root>", 0 } } });
+}
+
+void CallStackMachine::emit(bool begin, const std::string& name)
+{
+    slices_.push_back({ tick_++, last_byte_index_, begin, name, cur().track });
+    if (begin) {
+        begins_by_fn_[name]++;
+        metrics_.begins++;
+    } else {
+        ends_by_fn_[name]++;
+        metrics_.ends++;
+    }
+    // max_depth tracks the deepest single-track call stack.
+    int d = static_cast<int>(cur().stack.size());
+    if (d > metrics_.max_depth)
+        metrics_.max_depth = d;
+}
+
+int CallStackMachine::track_for_exception(uint32_t number)
+{
+    auto it = exc_track_.find(number);
+    if (it != exc_track_.end())
+        return it->second;
+    int t = next_track_++;
+    exc_track_[number] = t;
+    track_names_[t] = exception_name(number);
+    return t;
 }
 
 void CallStackMachine::do_call(const std::string& callee, uint32_t ret)
 {
+    auto& stack = cur().stack;
     // Blind-spot guard: about to push a frame whose function equals the current
     // top and that function is not actually self-recursive => the previous
     // frame's return was lost to a gap. Pop the stale frame first (net:
     // re-entry, no runaway depth).
-    if (!stack_.empty() && stack_.back().fn == callee && !is_self_recursive(callee)) {
-        ends_by_fn_[stack_.back().fn]++;
-        slices_.push_back({ tick_++, last_byte_index_, false, stack_.back().fn });
-        metrics_.ends++;
-        stack_.pop_back();
+    if (!stack.empty() && stack.back().fn == callee && !is_self_recursive(callee)) {
+        emit(false, stack.back().fn);
+        stack.pop_back();
         metrics_.recovered_missed_returns++;
     }
-    const std::string& caller = stack_.empty() ? std::string("<root>") : stack_.back().fn;
+    const std::string& caller = stack.empty() ? std::string("<root>") : stack.back().fn;
     edges_[caller + " -> " + callee]++;
-    begins_by_fn_[callee]++;
-    metrics_.begins++;
-    stack_.push_back({ callee, ret });
-    slices_.push_back({ tick_++, last_byte_index_, true, callee });
-    if (static_cast<int>(stack_.size()) > metrics_.max_depth)
-        metrics_.max_depth = static_cast<int>(stack_.size());
+    stack.push_back({ callee, ret });
+    emit(true, callee);
 }
 
 void CallStackMachine::do_return()
 {
-    if (stack_.size() > 1) {
-        ends_by_fn_[stack_.back().fn]++;
-        slices_.push_back({ tick_++, last_byte_index_, false, stack_.back().fn });
-        metrics_.ends++;
-        stack_.pop_back();
+    auto& stack = cur().stack;
+    if (stack.size() > 1) {
+        emit(false, stack.back().fn);
+        stack.pop_back();
     } else {
         metrics_.mismatched_returns++;
     }
@@ -80,8 +109,9 @@ void CallStackMachine::do_return()
 
 void CallStackMachine::relabel_top(const std::string& fn)
 {
-    if (!stack_.empty())
-        stack_.back().fn = fn;
+    auto& stack = cur().stack;
+    if (!stack.empty())
+        stack.back().fn = fn;
 }
 
 void CallStackMachine::process(const Element& e)
@@ -92,6 +122,7 @@ void CallStackMachine::process(const Element& e)
     case ElementKind::InstrRange: {
         const uint32_t start = e.start_addr;
         const uint32_t end = e.end_addr;
+        auto& stack = cur().stack;
 
         // Resolve a pending CALL from the previous range. Confirm only if this
         // range starts exactly at a function entry; otherwise the callee body
@@ -106,28 +137,27 @@ void CallStackMachine::process(const Element& e)
         }
         after_blind_ = false;
 
-        // Reconcile the stack with where we actually are (unless we just
-        // confirmed a fresh call above, in which case top == callee already).
-        if (!stack_.empty()) {
+        // Reconcile the current track's stack with where we actually are
+        // (unless we just confirmed a fresh call above, in which case top ==
+        // callee already).
+        if (!stack.empty()) {
             const std::string& fn = syms_.function_at(start);
-            if (stack_.back().fn != fn) {
+            if (stack.back().fn != fn) {
                 // If `fn` matches a frame BELOW the top, the frames above it
                 // returned without us seeing the return element (lost to a
-                // blind spot). Unwind to that frame -- this is the general
+                // blind spot). Unwind to that frame -- the general
                 // missed-return recovery.
                 int found = -1;
-                for (int i = static_cast<int>(stack_.size()) - 2; i >= 0; --i) {
-                    if (stack_[i].fn == fn) {
+                for (int i = static_cast<int>(stack.size()) - 2; i >= 0; --i) {
+                    if (stack[i].fn == fn) {
                         found = i;
                         break;
                     }
                 }
                 if (found >= 0) {
-                    while (static_cast<int>(stack_.size()) - 1 > found) {
-                        ends_by_fn_[stack_.back().fn]++;
-                        slices_.push_back({ tick_++, last_byte_index_, false, stack_.back().fn });
-                        metrics_.ends++;
-                        stack_.pop_back();
+                    while (static_cast<int>(stack.size()) - 1 > found) {
+                        emit(false, stack.back().fn);
+                        stack.pop_back();
                         metrics_.recovered_missed_returns++;
                     }
                 } else if (!syms_.is_function_entry(start)) {
@@ -149,29 +179,30 @@ void CallStackMachine::process(const Element& e)
     }
 
     case ElementKind::Exception: {
+        // Preempt the current context: open a NEW context on this exception's
+        // own track (one track per exception number). The ISR's functions land
+        // on that track, not nested on the preempted function.
         pending_call_ = false;
         const std::string nm = exception_name(e.exception_number);
+        const int track = track_for_exception(e.exception_number);
         metrics_.exceptions++;
-        exc_depth_mark_.push_back(static_cast<int>(stack_.size()));
-        begins_by_fn_[nm]++;
-        metrics_.begins++;
-        stack_.push_back({ nm, 0 });
-        slices_.push_back({ tick_++, last_byte_index_, true, nm });
-        if (static_cast<int>(stack_.size()) > metrics_.max_depth)
-            metrics_.max_depth = static_cast<int>(stack_.size());
+        ctx_.push_back({ track, {} });
+        // The ISR frame itself is the root of this context's stack.
+        cur().stack.push_back({ nm, 0 });
+        emit(true, nm);
         break;
     }
 
     case ElementKind::ExceptionRet: {
-        if (!exc_depth_mark_.empty()) {
-            const int target = exc_depth_mark_.back();
-            exc_depth_mark_.pop_back();
-            while (static_cast<int>(stack_.size()) > target) {
-                ends_by_fn_[stack_.back().fn]++;
-                slices_.push_back({ tick_++, last_byte_index_, false, stack_.back().fn });
-                metrics_.ends++;
-                stack_.pop_back();
+        // Close the current ISR context: pop all its frames (the ISR frame +
+        // any functions it called), then return to the preempted context.
+        if (ctx_.size() > 1) {
+            auto& stack = cur().stack;
+            while (!stack.empty()) {
+                emit(false, stack.back().fn);
+                stack.pop_back();
             }
+            ctx_.pop_back();
         }
         pending_call_ = false;
         after_blind_ = true;
@@ -197,12 +228,18 @@ void CallStackMachine::process(const Element& e)
 
 void CallStackMachine::finish()
 {
-    // Close still-open frames (down to the root) for a balanced slice stream.
-    while (stack_.size() > 1) {
-        ends_by_fn_[stack_.back().fn]++;
-        slices_.push_back({ tick_++, last_byte_index_, false, stack_.back().fn });
-        metrics_.ends++;
-        stack_.pop_back();
+    // Close every still-open context (innermost ISR first, down to the main
+    // thread root) so the emitted slice stream is balanced on every track.
+    while (!ctx_.empty()) {
+        auto& stack = cur().stack;
+        const bool is_main = (ctx_.size() == 1);
+        while (stack.size() > (is_main ? 1u : 0u)) {
+            emit(false, stack.back().fn);
+            stack.pop_back();
+        }
+        if (is_main)
+            break;
+        ctx_.pop_back();
     }
 }
 

@@ -92,4 +92,56 @@ bool write_perfetto_trace(const std::string& path, const std::vector<SliceEvent>
     return wrote == bytes.size();
 }
 
+std::string encode_perfetto_trace_multi(
+    const std::vector<SliceEvent>& slices, const std::map<int, std::string>& tracks)
+{
+    std::string trace;
+
+    // Stable track_uuid per track id (nonzero). track id 0 -> 0x1000, etc.
+    auto uuid_of
+        = [](int track_id) -> uint64_t { return 0x1000ull + static_cast<uint64_t>(track_id); };
+
+    // One TrackDescriptor packet per track.
+    for (const auto& kv : tracks) {
+        std::string td;
+        put_uint(td, 1, uuid_of(kv.first)); // uuid
+        put_len(td, 2, kv.second); // name
+        std::string pkt;
+        put_len(pkt, 60, td); // track_descriptor
+        put_len(trace, 1, pkt); // TracePacket
+    }
+
+    // Slice packets, each routed to its track via track_uuid.
+    bool first = true;
+    for (const auto& s : slices) {
+        std::string te;
+        put_uint(te, 9, s.begin ? TE_TYPE_SLICE_BEGIN : TE_TYPE_SLICE_END);
+        put_uint(te, 11, uuid_of(s.track));
+        if (s.begin)
+            put_len(te, 23, s.name);
+        std::string pkt;
+        put_uint(pkt, 8, s.tick);
+        put_len(pkt, 11, te);
+        put_uint(pkt, 10, 1); // trusted_packet_sequence_id (single sequence)
+        if (first) {
+            put_uint(pkt, 13, 1); // sequence_flags: incremental state cleared
+            first = false;
+        }
+        put_len(trace, 1, pkt);
+    }
+    return trace;
+}
+
+bool write_perfetto_trace_multi(const std::string& path, const std::vector<SliceEvent>& slices,
+    const std::map<int, std::string>& tracks)
+{
+    const std::string bytes = encode_perfetto_trace_multi(slices, tracks);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    const std::size_t wrote = std::fwrite(bytes.data(), 1, bytes.size(), f);
+    std::fclose(f);
+    return wrote == bytes.size();
+}
+
 } // namespace cortrace

@@ -99,25 +99,124 @@ TEST(callstack_return_underflow_counts_mismatch)
     CHECK_EQ(m.metrics().mismatched_returns, 1L);
 }
 
-TEST(callstack_exception_systick_nested_and_balanced)
+TEST(callstack_exception_systick_on_own_track_and_balanced)
 {
     SymbolTable syms = make_syms();
     CallStackMachine m(syms);
 
     m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false)); // in main
-    m.process(Element::exception(15)); // SysTick entry
+    m.process(Element::exception(15)); // SysTick entry -> its own track
     m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false)); // ISR body
     m.process(Element::simple(ElementKind::ExceptionRet)); // ISR return
     m.finish();
 
     CHECK_EQ(m.metrics().exceptions, 1L);
     CHECK(m.metrics().balanced());
-    // a SysTick slice must have been emitted
-    bool systick = false;
+
+    // the SysTick slice must be emitted on a NON-main track (track != 0), and
+    // its track must be registered with the ISR name.
+    int systick_track = -1;
     for (auto& s : m.slices())
         if (s.begin && s.name == "IRQ:SysTick")
-            systick = true;
-    CHECK(systick);
+            systick_track = s.track;
+    CHECK(systick_track > 0); // not the main thread track (0)
+    auto it = m.tracks().find(systick_track);
+    CHECK(it != m.tracks().end());
+    CHECK_EQ(it->second, std::string("IRQ:SysTick"));
+
+    // main-thread slices stay on track 0.
+    for (auto& s : m.slices())
+        if (s.name == "main")
+            CHECK_EQ(s.track, 0);
+}
+
+TEST(callstack_isr_does_not_nest_on_preempted_function)
+{
+    // The ISR must NOT appear as a child of the function it preempted: main's
+    // frame stays on track 0, the ISR lives entirely on its own track.
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false)); // main running
+    m.process(Element::exception(15)); // preempt
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false)); // ISR body
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    m.process(Element::instr_range(0x1008, 0x100c, BranchKind::None, false)); // main resumes
+    m.finish();
+
+    // Every IRQ slice is on a track != 0; every non-IRQ slice is on track 0.
+    for (auto& s : m.slices()) {
+        if (s.name.rfind("IRQ:", 0) == 0)
+            CHECK(s.track != 0);
+        else
+            CHECK_EQ(s.track, 0);
+    }
+    CHECK(m.metrics().balanced());
+}
+
+TEST(callstack_distinct_exceptions_get_distinct_tracks)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    // SysTick (15)
+    m.process(Element::exception(15));
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    // PendSV (14) -- different exception number -> different track
+    m.process(Element::exception(14));
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    // SysTick again -- must REUSE the first SysTick track (stable per number)
+    m.process(Element::exception(15));
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    m.finish();
+
+    int systick_track = -1, pendsv_track = -1, systick_track2 = -1;
+    int systick_seen = 0;
+    for (auto& s : m.slices()) {
+        if (!s.begin)
+            continue;
+        if (s.name == "IRQ:SysTick") {
+            if (systick_seen == 0)
+                systick_track = s.track;
+            else
+                systick_track2 = s.track;
+            systick_seen++;
+        } else if (s.name == "IRQ:PendSV") {
+            pendsv_track = s.track;
+        }
+    }
+    CHECK(systick_track > 0);
+    CHECK(pendsv_track > 0);
+    CHECK(systick_track != pendsv_track); // distinct exceptions -> distinct tracks
+    CHECK_EQ(systick_track, systick_track2); // same exception number -> same track
+    CHECK(m.metrics().balanced());
+}
+
+TEST(callstack_nested_exception_preempts_isr_on_its_own_track)
+{
+    // A higher-priority exception preempts an ISR: it runs on ITS own track,
+    // then control returns to the first ISR's track, then to main.
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false)); // main
+    m.process(Element::exception(15)); // SysTick
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::exception(14)); // PendSV preempts SysTick (nested)
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::simple(ElementKind::ExceptionRet)); // back to SysTick
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::simple(ElementKind::ExceptionRet)); // back to main
+    m.finish();
+
+    CHECK_EQ(m.metrics().exceptions, 2L);
+    CHECK(m.metrics().balanced());
+    // three distinct tracks registered: main + SysTick + PendSV
+    CHECK(m.tracks().size() >= 3);
 }
 
 TEST(callstack_missed_return_recovered_on_reentry)
@@ -136,6 +235,48 @@ TEST(callstack_missed_return_recovered_on_reentry)
 
     // the stale leaf frame must have been popped before re-entry (no runaway)
     CHECK(m.metrics().recovered_missed_returns >= 1L);
+    CHECK(m.metrics().balanced());
+}
+
+TEST(callstack_finish_closes_open_isr_and_main_frames)
+{
+    // End of trace while an ISR (with a called function) and a main-thread call
+    // are still open: finish() must close every frame on every track so the
+    // slice stream is balanced.
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false)); // main
+    m.process(Element::instr_range(0x1004, 0x1008, BranchKind::DirectCall, true));
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false)); // in leaf
+    m.process(Element::exception(15)); // SysTick preempts, leaves ISR open
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false)); // ISR body
+    // no ExceptionRet, no returns -> everything open at EOT
+    m.finish();
+
+    CHECK(m.metrics().balanced()); // finish() closed all open frames
+    // per-track balance: count begins/ends per track
+    std::map<int, long> bal;
+    for (auto& s : m.slices())
+        bal[s.track] += s.begin ? 1 : -1;
+    for (auto& kv : bal)
+        CHECK_EQ(kv.second, 0L); // every track nets to zero
+}
+
+TEST(callstack_indirect_call_is_a_call)
+{
+    // IndirectCall (BLX reg) confirmed at a function entry is a real call edge.
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    m.process(Element::instr_range(0x1004, 0x1008, BranchKind::IndirectCall, true));
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false)); // leaf entry
+    m.finish();
+    bool found = false;
+    for (auto& kv : m.edges())
+        if (kv.first == "main -> leaf")
+            found = true;
+    CHECK(found);
     CHECK(m.metrics().balanced());
 }
 
