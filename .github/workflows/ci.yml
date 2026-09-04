@@ -27,8 +27,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake g++ gcovr libopencsd-dev
 
-      - name: Configure (coverage on)
-        run: cmake -S . -B build -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+      - name: Configure (coverage + -Werror on)
+        run: cmake -S . -B build -DENABLE_COVERAGE=ON -DCORTRACE_WERROR=ON -DCMAKE_BUILD_TYPE=Debug
 
       - name: Build
         run: cmake --build build -j"$(nproc)"

@@ -14,6 +14,15 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic)
+
+# -Werror is opt-in via `-DCORTRACE_WERROR=ON` (or CI sets it). Local dev
+# builds don't want it (unfinished code, third-party header noise), but CI
+# demands zero warnings so any new regression fails the build.
+option(CORTRACE_WERROR "Treat warnings as errors" OFF)
+if(CORTRACE_WERROR)
+    add_compile_options(-Werror)
+endif()
+
 enable_coverage_if_requested()
 
 # ---- core library ---------------------------------------------------------
