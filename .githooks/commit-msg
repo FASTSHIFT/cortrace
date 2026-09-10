@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# commit-msg hook: enforce Conventional-Commit style subject lines.
+#
+# Accepted forms (first line of the message):
+#   feat(scope): ...   fix: ...   docs(a/b): ...   refactor!: ...   etc.
+#   Revert "..."
+# where type is one of feat|fix|docs|refactor|test|chore|style|perf,
+# an optional (scope) uses [a-z0-9_./-], an optional ! marks a breaking
+# change, and a non-empty description follows ": ".
+#
+# Install with: scripts/install-hooks.sh  (sets core.hooksPath to .githooks)
+set -euo pipefail
+
+MSG_FILE="$1"
+# First non-comment, non-empty line is the subject.
+SUBJECT="$(grep -vE '^\s*#' "$MSG_FILE" | grep -vE '^\s*$' | head -n1 || true)"
+
+PATTERN='^((Revert ".*")|((feat|fix|docs|refactor|test|chore|style|perf)(\([a-z0-9_./-]+\))?!?: .+))'
+
+if [[ ! "$SUBJECT" =~ $PATTERN ]]; then
+    echo "commit blocked: subject does not match the required format." >&2
+    echo "" >&2
+    echo "  got:      $SUBJECT" >&2
+    echo "  expected: <type>(<scope>): <description>" >&2
+    echo "            type = feat|fix|docs|refactor|test|chore|style|perf" >&2
+    echo "            scope optional, chars [a-z0-9_./-]; '!' allowed for breaking" >&2
+    echo "" >&2
+    echo "  examples: fix(decode): cap lister address space" >&2
+    echo "            docs(zh): localise notes" >&2
+    echo "            feat(api)!: change element schema" >&2
+    echo "            Revert \"fix(decode): ...\"" >&2
+    exit 1
+fi

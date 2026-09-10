@@ -10,3 +10,4 @@ chmod +x .githooks/* 2>/dev/null || true
 git config core.hooksPath .githooks
 echo "git hooks installed (core.hooksPath = .githooks)"
 echo "pre-commit will enforce clang-format on staged C/C++ files."
+echo "commit-msg will enforce Conventional-Commit subject lines."
