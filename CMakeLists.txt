@@ -23,6 +23,20 @@ if(CORTRACE_WERROR)
     add_compile_options(-Werror)
 endif()
 
+# AddressSanitizer + UBSan: catch memory errors (use-after-free, OOB, leaks) and
+# undefined behaviour in the Debug build and in CI. Opt-in via -DCORTRACE_ASAN=ON
+# so the coverage build (which must run clean under gcov) is unaffected. ASAN and
+# gcov coverage don't mix well, so treat them as mutually exclusive.
+option(CORTRACE_ASAN "Build with AddressSanitizer + UBSan" OFF)
+if(CORTRACE_ASAN)
+    if(ENABLE_COVERAGE)
+        message(FATAL_ERROR "CORTRACE_ASAN and ENABLE_COVERAGE are mutually exclusive")
+    endif()
+    message(STATUS "Sanitizers: AddressSanitizer + UBSan enabled")
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 enable_coverage_if_requested()
 
 # ---- core library ---------------------------------------------------------
