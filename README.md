@@ -1,5 +1,7 @@
 # Cortrace
 
+**简体中文** | [English](README_en.md)
+
 **Cortrace** 把 ARM CoreSight ETM trace 原始字节流转换成函数级
 [Perfetto](https://ui.perfetto.dev) 时间线。它用 ARM/Linaro 官方参考解码器
 [OpenCSD](https://github.com/Linaro/OpenCSD) 解码，重建调用栈，并（规划中）
@@ -84,6 +86,11 @@ scripts/            format.sh, install-hooks.sh
 docs/               ARCHITECTURE.md
 ```
 
+## 相关仓库
+
+- [**cortrace-fpga**](https://github.com/FASTSHIFT/cortrace-fpga) — Artix-7 并口 ETM 采集设备，通过 UDP 把 trace 送来解码
+- [**stm32h743-etm-trace-firmware**](https://github.com/FASTSHIFT/stm32h743-etm-trace-firmware) — 确定性 selftrace 目标板固件
+
 ## 许可证
 
-MIT © 2026 VIFEX
+MIT © 2026 VIFEX（见 [`LICENSE`](LICENSE)）。
