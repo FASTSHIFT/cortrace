@@ -478,18 +478,20 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "wrote %zu call edges -> %s\n", machine.edges().size(), edges_path);
     }
     if (events_path) {
-        // Plain begin/end event log for downstream structural verification
-        // (selftrace_strict_verify.py etc). One line per slice event:
-        //   +funcname   for begin
-        //   -funcname   for end
-        // Emitted in tick order, matching the perftrace exactly.
+        // Begin/end event log for downstream structural + timing verification.
+        // One line per slice event: "<+|->funcname<TAB>cycle_clock<TAB>etm_ts".
+        // The cycle_clock column (accumulated CPU cycles) lets a checker verify
+        // timing precision, e.g. that each iteration of a deterministic loop is
+        // a constant number of cycles apart.
         FILE* ef = std::fopen(events_path, "w");
         if (!ef) {
             std::fprintf(stderr, "error: cannot write events to %s\n", events_path);
             return 1;
         }
         for (const auto& s : machine.slices())
-            std::fprintf(ef, "%c%s\n", s.begin ? '+' : '-', s.name.c_str());
+            std::fprintf(ef, "%c%s\t%llu\t%llu\n", s.begin ? '+' : '-', s.name.c_str(),
+                static_cast<unsigned long long>(s.cycle_clock),
+                static_cast<unsigned long long>(s.etm_ts));
         std::fclose(ef);
         std::fprintf(stderr, "wrote %zu events -> %s\n", machine.slices().size(), events_path);
     }
