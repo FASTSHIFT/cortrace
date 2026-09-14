@@ -13,24 +13,39 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
-add_compile_options(-Wall -Wextra -Wpedantic)
+# Warning flags apply ONLY to our own targets, never to the vendored OpenCSD
+# submodule: it is third-party source with its own (harmless) warnings --
+# anonymous structs, ignored qualifiers -- that must not fail our build. Using
+# a per-target variable instead of add_compile_options keeps them out of the
+# add_subdirectory(opencsd) below.
+set(CORTRACE_WARN_FLAGS -Wall -Wextra -Wpedantic)
 
 # -Werror is opt-in via `-DCORTRACE_WERROR=ON` (or CI sets it). Local dev
-# builds don't want it (unfinished code, third-party header noise), but CI
-# demands zero warnings so any new regression fails the build.
+# builds don't want it (unfinished code), but CI demands zero warnings so any
+# new regression in OUR code fails the build. Still scoped to our targets only.
 option(CORTRACE_WERROR "Treat warnings as errors" OFF)
 if(CORTRACE_WERROR)
-    add_compile_options(-Werror)
+    list(APPEND CORTRACE_WARN_FLAGS -Werror)
 endif()
 
+# Helper: apply our warning flags to a target. Called for each of our targets.
+function(cortrace_set_warnings target)
+    target_compile_options(${target} PRIVATE ${CORTRACE_WARN_FLAGS})
+endfunction()
+
 # AddressSanitizer + UBSan: catch memory errors (use-after-free, OOB, leaks) and
-# undefined behaviour in the Debug build and in CI. Opt-in via -DCORTRACE_ASAN=ON
-# so the coverage build (which must run clean under gcov) is unaffected. ASAN and
-# gcov coverage don't mix well, so treat them as mutually exclusive.
+# undefined behaviour. Opt-in via -DCORTRACE_ASAN=ON. Applied globally so the
+# vendored OpenCSD is instrumented too (ASan then sees cross-library issues).
+#
+# NOTE: kept mutually exclusive with ENABLE_COVERAGE -- gcovr cannot parse the
+# gcov data produced from an ASan-instrumented build (it sees a function on
+# multiple lines and asserts). CI runs both in ONE job via two separate build
+# dirs (sanitized test run + coverage-gate run), not two jobs.
 option(CORTRACE_ASAN "Build with AddressSanitizer + UBSan" OFF)
 if(CORTRACE_ASAN)
     if(ENABLE_COVERAGE)
-        message(FATAL_ERROR "CORTRACE_ASAN and ENABLE_COVERAGE are mutually exclusive")
+        message(FATAL_ERROR "CORTRACE_ASAN and ENABLE_COVERAGE can't share a build dir "
+                            "(gcovr can't parse ASan-instrumented gcov); use separate builds")
     endif()
     message(STATUS "Sanitizers: AddressSanitizer + UBSan enabled")
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
@@ -50,6 +65,18 @@ file(GLOB CORTRACE_CORE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 list(REMOVE_ITEM CORTRACE_CORE_SRC ${CMAKE_SOURCE_DIR}/src/opencsd_decoder.cpp)
 add_library(cortrace_core ${CORTRACE_CORE_SRC})
 target_include_directories(cortrace_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+cortrace_set_warnings(cortrace_core)
+
+# The OpenCSD adapter (added below) is the one file of ours that includes the
+# third-party OpenCSD headers, whose anonymous structs / ignored qualifiers trip
+# -Wpedantic. -isystem doesn't reliably win when the same dir is also on the
+# link interface as -I, so cancel -Wpedantic for just this file by appending
+# -Wno-pedantic (gcc/clang honour the last flag). Our own code elsewhere keeps
+# the full strict set.
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/opencsd_decoder.cpp)
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/src/opencsd_decoder.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wno-pedantic;-Wno-ignored-qualifiers")
+endif()
 
 # ---- OpenCSD-backed decoder adapter ---------------------------------------
 # Preferred: build OpenCSD FROM SOURCE as a vendored submodule
@@ -82,7 +109,7 @@ else()
         message(STATUS "OpenCSD: using system-installed libopencsd (no source submodule)")
         if(EXISTS ${CMAKE_SOURCE_DIR}/src/opencsd_decoder.cpp)
             target_sources(cortrace_core PRIVATE src/opencsd_decoder.cpp)
-            target_include_directories(cortrace_core PUBLIC ${OPENCSD_INCLUDE_DIR})
+            target_include_directories(cortrace_core SYSTEM PUBLIC ${OPENCSD_INCLUDE_DIR})
             target_link_libraries(cortrace_core PUBLIC ${OPENCSD_C_API_LIB} ${OPENCSD_LIB})
             target_compile_definitions(cortrace_core PUBLIC CORTRACE_HAVE_OPENCSD=1)
             set(CORTRACE_HAVE_OPENCSD ON)
@@ -107,6 +134,7 @@ if(CORTRACE_HAVE_OPENCSD)
         add_executable(${tool_name} ${tool_src})
         target_link_libraries(${tool_name} PRIVATE cortrace_core)
         target_include_directories(${tool_name} PRIVATE ${ARGPARSE_INCLUDE})
+        cortrace_set_warnings(${tool_name})
     endforeach()
 endif()
 
@@ -117,6 +145,7 @@ file(GLOB CORTRACE_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cpp)
 add_executable(cortrace_tests ${CORTRACE_TEST_SRC})
 target_link_libraries(cortrace_tests PRIVATE cortrace_core)
 target_include_directories(cortrace_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+cortrace_set_warnings(cortrace_tests)
 add_test(NAME unit COMMAND cortrace_tests)
 
 # ---- coverage target with a minimum line-coverage gate --------------------

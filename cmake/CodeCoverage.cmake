@@ -45,6 +45,10 @@ function(add_coverage_target test_target min_percent)
                 # exercised by the CLI / integration tests (needs a live
                 # decoder), not by the synthetic-element unit tests.
                 --exclude ".*/src/opencsd_decoder.cpp"
+                # gcovr >= 8 asserts when one function shows up on multiple
+                # lines in the gcov data (inlining / cxx-abi tags); "separate"
+                # keeps each record instead of failing. Harmless on older gcovr.
+                --merge-mode-functions=separate
                 --xml ${CMAKE_BINARY_DIR}/coverage.xml
                 --html-details ${_html_dir}/index.html
                 --print-summary

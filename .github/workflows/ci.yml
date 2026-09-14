@@ -16,38 +16,8 @@ jobs:
       - name: Check formatting
         run: bash scripts/format.sh --check
 
-  asan:
-    name: build + test (ASan + UBSan)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake g++ libopencsd-dev
-
-      - name: Configure (ASan + UBSan, -Werror)
-        run: cmake -S . -B build-asan -DCORTRACE_ASAN=ON -DCORTRACE_WERROR=ON -DCMAKE_BUILD_TYPE=Debug
-
-      - name: Build
-        run: cmake --build build-asan -j"$(nproc)"
-
-      - name: Run tests under sanitizers
-        # halt_on_error=1 so any ASan/UBSan finding fails the job; detect_leaks
-        # catches leaks at exit.
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        # --timeout caps a hung run: the ASan runtime can rarely spin at 100% CPU
-        # if it faults during its own init/symbol-binding, so fail instead of
-        # hanging the runner.
-        run: ctest --test-dir build-asan --output-on-failure --timeout 120
-
   build-test-coverage:
-    name: build + test + coverage gate
+    name: build + test (ASan + UBSan) + coverage gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,16 +29,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake g++ gcovr libopencsd-dev
 
-      - name: Configure (coverage + -Werror on)
+      # ASan+UBSan and gcov can't share a build dir (gcovr can't parse
+      # ASan-instrumented gcov), so use two build dirs in this one job.
+      - name: Configure (ASan + UBSan, -Werror)
+        run: cmake -S . -B build-asan -DCORTRACE_ASAN=ON -DCORTRACE_WERROR=ON -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build (sanitized)
+        run: cmake --build build-asan -j"$(nproc)"
+
+      - name: Run tests under sanitizers
+        # halt_on_error=1 so any ASan/UBSan finding fails the job; detect_leaks
+        # catches leaks at exit. --timeout caps the rare ASan-init CPU spin.
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure --timeout 120
+
+      - name: Configure (coverage, -Werror)
         run: cmake -S . -B build -DENABLE_COVERAGE=ON -DCORTRACE_WERROR=ON -DCMAKE_BUILD_TYPE=Debug
 
-      - name: Build
+      - name: Build (coverage)
         run: cmake --build build -j"$(nproc)"
 
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure
-
-      - name: Coverage (fails under minimum line threshold)
+      - name: Coverage gate (also runs the tests; fails under the line threshold)
         run: cmake --build build --target coverage
 
       - name: Upload coverage report
