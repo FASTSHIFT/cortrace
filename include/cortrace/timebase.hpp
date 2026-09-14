@@ -53,6 +53,15 @@ std::vector<SliceEvent> apply_timebase(const std::vector<SliceEvent>& slices, co
 std::vector<SliceEvent> apply_etm_timestamp(
     const std::vector<SliceEvent>& slices, double tsgen_hz = 0.0);
 
+// Return a copy of `slices` with each event's `tick` set from the accumulated
+// CPU-cycle clock (SliceEvent.cycle_clock, from ETM cycle counting). If
+// `sysclk_hz > 0` the cycle count is converted to ns (cycles * 1e9 / hz);
+// otherwise the raw cycle count is the tick. This is the finest time base --
+// CPU-cycle resolution (~6.7 ns @150 MHz) -- available when TRCCONFIGR.CCI is
+// on. Clamped non-decreasing for Perfetto.
+std::vector<SliceEvent> apply_cycle_time(
+    const std::vector<SliceEvent>& slices, double sysclk_hz = 0.0);
+
 } // namespace cortrace
 
 #endif // CORTRACE_TIMEBASE_HPP

@@ -17,6 +17,7 @@
 #include "cortrace/callstack.hpp"
 #include "cortrace/decoder.hpp"
 #include "cortrace/deframe.hpp"
+#include "cortrace/log.hpp"
 #include "cortrace/perfetto_writer.hpp"
 #include "cortrace/symbols.hpp"
 #include "cortrace/timebase.hpp"
@@ -101,11 +102,17 @@ struct Coverage {
         default:
             break;
         }
+        if (e.has_cc) {
+            cc_count++;
+            cc_total += e.cycle_count;
+        }
     }
 
     long ts_count = 0;
     bool have_first_ts = false;
     uint64_t first_ts = 0, last_ts = 0;
+    long cc_count = 0; // elements carrying a cycle count
+    uint64_t cc_total = 0; // summed CPU cycles
 };
 
 } // namespace
@@ -133,6 +140,14 @@ int main(int argc, char** argv)
         .scan<'g', double>()
         .default_value(0.0)
         .help("TSGEN frequency for --etm-time count->ns (0 = raw counts as ticks)");
+    program.add_argument("--cycle-time")
+        .flag()
+        .help("use the ETM cycle-count clock (CPU-cycle resolution) as the time base");
+    program.add_argument("--sysclk-hz")
+        .metavar("HZ")
+        .scan<'g', double>()
+        .default_value(0.0)
+        .help("CPU clock for --cycle-time cycles->ns (0 = raw cycles as ticks)");
     program.add_argument("--perf").metavar("out.perftrace").help("write a Perfetto trace");
     program.add_argument("--edges").metavar("out.tsv").help("write call edges for ELF cross-check");
     program.add_argument("--events")
@@ -151,6 +166,10 @@ int main(int argc, char** argv)
         .help("with --raw, also write the deframed ETM bytes");
     program.add_argument("--phase").metavar("P,O").help(
         "lock the deframe phase (skip the search), e.g. 1,0 for the A7-Lite default");
+    program.add_argument("--log-level")
+        .metavar("LVL")
+        .default_value(std::string("warn"))
+        .help("diagnostic log level: error|warn|info|debug|trace (default warn)");
 
     try {
         program.parse_args(argc, argv);
@@ -159,6 +178,8 @@ int main(int argc, char** argv)
         std::cerr << program;
         return 2;
     }
+
+    cortrace::log::set_level_from_str(program.get("--log-level"));
 
     const std::string etm_path = program.get("etm");
     const std::string mem_path = program.get("mem");
@@ -174,6 +195,8 @@ int main(int argc, char** argv)
     const char* perf_path = perf_opt ? perf_opt->c_str() : nullptr;
     const bool etm_time = program.get<bool>("--etm-time");
     const double tsgen_hz = program.get<double>("--tsgen-hz");
+    const bool cycle_time = program.get<bool>("--cycle-time");
+    const double sysclk_hz = program.get<double>("--sysclk-hz");
     const char* edges_path = edges_opt ? edges_opt->c_str() : nullptr;
     const char* events_path = events_opt ? events_opt->c_str() : nullptr;
 
@@ -345,6 +368,12 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(cov.last_ts - cov.first_ts));
     }
     std::fprintf(stderr, "\n");
+    std::fprintf(stderr, "  cycle counts        : %ld", cov.cc_count);
+    if (cov.cc_count > 0) {
+        std::fprintf(
+            stderr, "  (%llu CPU cycles total)", static_cast<unsigned long long>(cov.cc_total));
+    }
+    std::fprintf(stderr, "\n");
 
     // ---- function-coverage report: flow-visited vs slice-rendered ----------
     // A function the instruction flow visited but that never rendered as a
@@ -396,7 +425,10 @@ int main(int argc, char** argv)
     if (perf_path) {
         std::vector<SliceEvent> timed;
         const char* base_desc;
-        if (etm_time) {
+        if (cycle_time) {
+            timed = apply_cycle_time(machine.slices(), sysclk_hz);
+            base_desc = sysclk_hz > 0.0 ? " (cycle count, ns)" : " (cycle count, raw cycles)";
+        } else if (etm_time) {
             timed = apply_etm_timestamp(machine.slices(), tsgen_hz);
             base_desc = tsgen_hz > 0.0 ? " (ETM timestamp, ns)" : " (ETM timestamp, raw counts)";
         } else {

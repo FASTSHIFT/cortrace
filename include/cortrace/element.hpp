@@ -22,6 +22,7 @@ enum class ElementKind {
     TraceOn, // (re)start of trace after a discontinuity
     AddrNacc, // address not accessible: a decode blind spot
     Timestamp, // wall-clock / cycle timestamp marker
+    CycleCount, // standalone cycle-count (cycles since last counted point)
 };
 
 // Branch classification of the last instruction in an InstrRange. Derived from
@@ -54,11 +55,19 @@ struct Element {
     // ETF-egress) time base.
     uint64_t timestamp = 0;
 
+    // Cycle-count fields. When cycle counting is enabled (TRCCONFIGR.CCI), an
+    // InstrRange can carry the number of CPU cycles it took (has_cc), and a
+    // Timestamp can carry the cycles since the last counted point. Accumulated
+    // on the host, this gives a CPU-cycle time base (sysclk resolution) to
+    // interpolate between the sparse global-timestamp anchors.
+    uint32_t cycle_count = 0;
+    bool has_cc = false;
+
     // Provenance / timing
     uint64_t byte_index = 0; // source ETM byte offset (OpenCSD idx_sop)
 
-    static Element instr_range(
-        uint32_t start, uint32_t end, BranchKind br, bool exec, uint64_t idx = 0)
+    static Element instr_range(uint32_t start, uint32_t end, BranchKind br, bool exec,
+        uint64_t idx = 0, bool has_cc = false, uint32_t cc = 0)
     {
         Element e;
         e.kind = ElementKind::InstrRange;
@@ -67,6 +76,8 @@ struct Element {
         e.branch = br;
         e.last_executed = exec;
         e.byte_index = idx;
+        e.has_cc = has_cc;
+        e.cycle_count = cc;
         return e;
     }
 

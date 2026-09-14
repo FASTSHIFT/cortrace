@@ -63,4 +63,20 @@ std::vector<SliceEvent> apply_etm_timestamp(const std::vector<SliceEvent>& slice
     return out;
 }
 
+std::vector<SliceEvent> apply_cycle_time(const std::vector<SliceEvent>& slices, double sysclk_hz)
+{
+    std::vector<SliceEvent> out = slices;
+    uint64_t last = 0;
+    for (auto& s : out) {
+        uint64_t t = s.cycle_clock;
+        if (sysclk_hz > 0.0)
+            t = static_cast<uint64_t>(static_cast<double>(s.cycle_clock) * 1e9 / sysclk_hz);
+        if (t < last)
+            t = last;
+        s.tick = t;
+        last = t;
+    }
+    return out;
+}
+
 } // namespace cortrace

@@ -12,6 +12,8 @@
 
 #include <cstring>
 
+#include "cortrace/log.hpp"
+
 #include "opencsd/c_api/opencsd_c_api.h"
 #include "opencsd/ocsd_if_types.h"
 #include "opencsd/trc_gen_elem_types.h"
@@ -101,8 +103,11 @@ namespace {
                     = ocsd_dt_process_data(tree_, OCSD_OP_DATA, index_ + consumed,
                         static_cast<uint32_t>(len - consumed), data + consumed, &used);
                 consumed += used;
-                if (OCSD_DATA_RESP_IS_FATAL(r))
+                if (OCSD_DATA_RESP_IS_FATAL(r)) {
+                    CT_LOG_ERROR("opencsd fatal decode response at byte %llu (resp=%d)",
+                        static_cast<unsigned long long>(index_ + consumed), static_cast<int>(r));
                     return false;
+                }
                 if (used == 0) // decoder wants no more data from this buffer
                     break;
             }
@@ -140,8 +145,18 @@ namespace {
                 emit(Element::instr_range(static_cast<uint32_t>(elem->st_addr),
                     static_cast<uint32_t>(elem->en_addr),
                     classify(elem->last_i_type, elem->last_i_subtype), elem->last_instr_exec != 0,
-                    bidx));
+                    bidx, elem->has_cc != 0, elem->cycle_count));
                 break;
+            case OCSD_GEN_TRC_ELEM_CYCLE_COUNT: {
+                // Standalone cycle-count element: cycles since the last counted
+                // point, not tied to a range. Its own kind so the call-stack
+                // machine accumulates the cycle clock without touching frames.
+                Element e = Element::simple(ElementKind::CycleCount, bidx);
+                e.has_cc = elem->has_cc != 0;
+                e.cycle_count = elem->cycle_count;
+                emit(e);
+                break;
+            }
             case OCSD_GEN_TRC_ELEM_EXCEPTION:
                 emit(Element::exception(elem->exception_number, bidx));
                 break;

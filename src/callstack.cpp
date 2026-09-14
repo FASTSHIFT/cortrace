@@ -13,6 +13,8 @@
 // SPDX-License-Identifier: MIT
 #include "cortrace/callstack.hpp"
 
+#include "cortrace/log.hpp"
+
 #include <string>
 
 namespace cortrace {
@@ -53,7 +55,8 @@ CallStackMachine::CallStackMachine(const SymbolTable& syms)
 
 void CallStackMachine::emit(bool begin, const std::string& name)
 {
-    slices_.push_back({ tick_++, last_byte_index_, begin, name, cur().track, last_etm_ts_ });
+    slices_.push_back(
+        { tick_++, last_byte_index_, begin, name, cur().track, last_etm_ts_, cycle_clock_ });
     if (begin) {
         begins_by_fn_[name]++;
         metrics_.begins++;
@@ -86,6 +89,8 @@ void CallStackMachine::do_call(const std::string& callee, uint32_t ret)
     // frame's return was lost to a gap. Pop the stale frame first (net:
     // re-entry, no runaway depth).
     if (!stack.empty() && stack.back().fn == callee && !is_self_recursive(callee)) {
+        CT_LOG_DEBUG("recovered missed return before re-entry into %s (byte %llu)", callee.c_str(),
+            static_cast<unsigned long long>(last_byte_index_));
         emit(false, stack.back().fn);
         stack.pop_back();
         metrics_.recovered_missed_returns++;
@@ -103,6 +108,8 @@ void CallStackMachine::do_return()
         emit(false, stack.back().fn);
         stack.pop_back();
     } else {
+        CT_LOG_WARN("mismatched return: stack near-empty at byte %llu (heuristic re-balanced)",
+            static_cast<unsigned long long>(last_byte_index_));
         metrics_.mismatched_returns++;
     }
 }
@@ -118,7 +125,18 @@ void CallStackMachine::process(const Element& e)
 {
     last_byte_index_ = e.byte_index;
 
+    // Accumulate the CPU-cycle clock from any element that carries a cycle
+    // count (an InstrRange with has_cc, or a standalone CycleCount element).
+    // This is the fine-grained (sysclk-resolution) time base used to
+    // interpolate between the sparse global-timestamp anchors.
+    if (e.has_cc)
+        cycle_clock_ += e.cycle_count;
+
     switch (e.kind) {
+    case ElementKind::CycleCount:
+        // Cycle clock already advanced above; no stack effect.
+        break;
+
     case ElementKind::InstrRange: {
         const uint32_t start = e.start_addr;
         const uint32_t end = e.end_addr;
@@ -132,8 +150,12 @@ void CallStackMachine::process(const Element& e)
             pending_call_ = false;
             if (!after_blind_ && syms_.is_function_entry(start))
                 do_call(syms_.function_at(start), pending_ret_);
-            else
+            else {
+                CT_LOG_WARN("dropped call at byte %llu: range starts 0x%x, not a function "
+                            "entry (callee lost to a blind spot)",
+                    static_cast<unsigned long long>(last_byte_index_), start);
                 metrics_.dropped_calls++;
+            }
         }
         after_blind_ = false;
 
@@ -156,6 +178,9 @@ void CallStackMachine::process(const Element& e)
                 }
                 if (found >= 0) {
                     while (static_cast<int>(stack.size()) - 1 > found) {
+                        CT_LOG_DEBUG("unwinding stale frame %s to reach %s (byte %llu)",
+                            stack.back().fn.c_str(), fn.c_str(),
+                            static_cast<unsigned long long>(last_byte_index_));
                         emit(false, stack.back().fn);
                         stack.pop_back();
                         metrics_.recovered_missed_returns++;
@@ -215,6 +240,9 @@ void CallStackMachine::process(const Element& e)
         // fabricate flow across it. A call left pending here loses its callee.
         if (pending_call_) {
             pending_call_ = false;
+            CT_LOG_WARN("dropped call at byte %llu: pending call straddled a %s discontinuity",
+                static_cast<unsigned long long>(last_byte_index_),
+                e.kind == ElementKind::TraceOn ? "TraceOn" : "AddrNacc");
             metrics_.dropped_calls++;
         }
         after_blind_ = true;

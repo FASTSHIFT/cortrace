@@ -26,6 +26,16 @@ struct SliceEvent {
     std::string name; // function / ISR name
     int track = 0; // track id: 0 = main thread, >=1 = a per-exception ISR track
     uint64_t etm_ts = 0; // most-recent ETM global timestamp seen before this event
+    uint64_t cycle_clock = 0; // accumulated CPU cycles (cycle counting) at this event
+};
+
+// An ETM global-timestamp anchor: the TSGEN value that was in force at a given
+// source byte offset. Between consecutive anchors the host interpolates by
+// byte_index so slices get a monotonically increasing time instead of all
+// sharing the last anchor's value.
+struct TsAnchor {
+    uint64_t byte_index;
+    uint64_t ts;
 };
 
 // Aggregate quality/΄shape metrics produced during reconstruction.
@@ -102,6 +112,7 @@ private:
     uint64_t tick_ = 0;
     uint64_t last_byte_index_ = 0;
     uint64_t last_etm_ts_ = 0; // most-recent ETM global timestamp value
+    uint64_t cycle_clock_ = 0; // accumulated CPU cycles (cycle counting)
     bool pending_call_ = false;
     uint32_t pending_ret_ = 0;
     bool after_blind_ = false;
