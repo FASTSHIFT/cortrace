@@ -1,0 +1,62 @@
+// Cortrace — FPGA raw-capture front end: nibble reassemble + TPIU deframe.
+//
+// The A7-Lite capture appliance streams the STM32 parallel-trace port as a raw
+// byte sequence (two nibbles per TRACECLK period, {trace_a hi, trace_b lo}).
+// Turning that into the bare ETMv4 byte stream OpenCSD wants is three byte-wise
+// passes that used to run in slow host Python (deframe_to_etm.py):
+//   1. nibble extract  : raw[k] -> two 4-bit nibbles
+//   2. assemble        : pair nibbles into bytes under a (parity, order) phase
+//   3. TPIU deframe     : 16-byte CoreSight frames -> the requested ATB stream
+// This is the C++ port so cortrace-decode can consume a raw capture directly
+// (orders of magnitude faster than the Python path).
+//
+// The (parity, order) phase is fixed for a given board + bitstream, but a fresh
+// capture's phase is recovered by trying all four and scoring each by the
+// number of post-deframe ETMv4 A-syncs (the only signal that proves the whole
+// chain — nibble phase, TPIU frame phase, stream demux — is aligned).
+//
+// SPDX-License-Identifier: MIT
+#ifndef CORTRACE_DEFRAME_HPP
+#define CORTRACE_DEFRAME_HPP
+
+#include <cstdint>
+#include <vector>
+
+namespace cortrace {
+
+// Nibble-pairing phase. parity drops the leading nibble (0 or 1); order chooses
+// whether the first nibble of a pair is the low or high half of the byte.
+struct DeframePhase {
+    int parity = 1; // matches the A7-Lite board default (parity=1, order=0)
+    int order = 0;
+};
+
+struct DeframeResult {
+    std::vector<uint8_t> etm; // deframed ETMv4 bytes for the requested stream
+    DeframePhase phase; // the phase actually used
+    int async_count = 0; // ETMv4 A-syncs found post-deframe (alignment score)
+    std::size_t frames = 0; // TPIU 16-byte frames decoded
+    std::size_t syncs = 0; // full TPIU sync patterns seen
+};
+
+// Assemble bytes from a raw capture under a fixed phase (no search).
+std::vector<uint8_t> assemble_nibbles(
+    const uint8_t* raw, std::size_t len, const DeframePhase& phase);
+
+// TPIU-deframe an assembled byte stream, extracting `want_stream` (ETM = 2).
+// Faithful port of orbuculum's tpiuDecoder.c (see tpiu_official.py).
+DeframeResult tpiu_deframe(
+    const std::vector<uint8_t>& data, int want_stream, const DeframePhase& phase);
+
+// Full front end: nibble-assemble + TPIU-deframe a raw FPGA capture. If
+// `search` is true, try all four phases and keep the one with the most
+// post-deframe A-syncs; otherwise use `phase` as given.
+DeframeResult deframe_raw_capture(
+    const uint8_t* raw, std::size_t len, int want_stream, bool search, const DeframePhase& phase);
+
+// Count ETMv4 A-syncs (>= 11 zero bytes followed by 0x80) in a byte stream.
+int count_etmv4_async(const uint8_t* data, std::size_t len);
+
+} // namespace cortrace
+
+#endif // CORTRACE_DEFRAME_HPP

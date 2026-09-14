@@ -94,6 +94,11 @@ endif()
 
 # ---- CLI front end (needs the OpenCSD-backed decoder) ---------------------
 # Auto-collect every CLI in tools/ (one executable per .cpp).
+# Command-line parsing for the CLIs: p-ranav/argparse, a single-header MIT
+# library vendored as a submodule (third_party/argparse, pinned v3.2). Header
+# only, so it is just an include directory — no build/link.
+set(ARGPARSE_INCLUDE ${CMAKE_SOURCE_DIR}/third_party/argparse/include)
+
 if(CORTRACE_HAVE_OPENCSD)
     file(GLOB CORTRACE_TOOLS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/*.cpp)
     foreach(tool_src ${CORTRACE_TOOLS})
@@ -101,6 +106,7 @@ if(CORTRACE_HAVE_OPENCSD)
         string(REPLACE "_" "-" tool_name ${tool_name})
         add_executable(${tool_name} ${tool_src})
         target_link_libraries(${tool_name} PRIVATE cortrace_core)
+        target_include_directories(${tool_name} PRIVATE ${ARGPARSE_INCLUDE})
     endforeach()
 endif()
 
