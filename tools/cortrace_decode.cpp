@@ -125,9 +125,20 @@ int main(int argc, char** argv)
         "-> Perfetto, with quality metrics and a function-coverage report.");
 
     program.add_argument("etm").help("input ETM bytes, or a raw FPGA capture with --raw");
-    program.add_argument("mem").help("flat memory image of the ELF");
-    program.add_argument("mem_base").help("load address (hex) of mem's first byte, e.g. 08000000");
     program.add_argument("syms").help("ELF symbol table (arm-none-eabi-nm output)");
+    // Program memory: EITHER --elf (preferred, always consistent) OR the legacy
+    // flat-binary pair. The flat binary is error-prone (objcopy -O binary
+    // mis-lays-out .data/gapped images), so --elf is recommended.
+    program.add_argument("--elf").metavar("fw.elf").help(
+        "program ELF; memory is read per PT_LOAD segment (preferred over mem/mem_base)");
+    program.add_argument("mem")
+        .metavar("mem.bin")
+        .default_value(std::string())
+        .help("flat memory image of the ELF (legacy; prefer --elf)");
+    program.add_argument("mem_base")
+        .metavar("mem_base_hex")
+        .default_value(std::string())
+        .help("load address (hex) of mem's first byte, e.g. 08000000 (legacy)");
 
     program.add_argument("--time")
         .metavar("time.bin")
@@ -182,10 +193,18 @@ int main(int argc, char** argv)
     cortrace::log::set_level_from_str(program.get("--log-level"));
 
     const std::string etm_path = program.get("etm");
-    const std::string mem_path = program.get("mem");
-    const uint32_t mem_base
-        = static_cast<uint32_t>(std::strtoul(program.get("mem_base").c_str(), nullptr, 16));
     const std::string syms_path = program.get("syms");
+    const std::string elf_path = program.is_used("--elf") ? program.get("--elf") : std::string();
+    const std::string mem_path = program.get("mem");
+    const uint32_t mem_base = mem_path.empty()
+        ? 0u
+        : static_cast<uint32_t>(std::strtoul(program.get("mem_base").c_str(), nullptr, 16));
+
+    if (elf_path.empty() && mem_path.empty()) {
+        std::fprintf(stderr, "error: provide --elf <fw.elf> (preferred) or mem.bin + mem_base\n");
+        std::cerr << program;
+        return 2;
+    }
 
     const auto time_opt = program.present("--time");
     const auto perf_opt = program.present("--perf");
@@ -273,9 +292,14 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "error: failed to create OpenCSD decoder\n");
         return 1;
     }
-    if (!decoder->add_memory_image(mem_base, mem_path)) {
-        std::fprintf(
-            stderr, "error: failed to add memory image %s @ 0x%08x\n", mem_path.c_str(), mem_base);
+    const bool mem_ok = elf_path.empty() ? decoder->add_memory_image(mem_base, mem_path)
+                                         : decoder->add_elf(elf_path);
+    if (!mem_ok) {
+        if (elf_path.empty())
+            std::fprintf(stderr, "error: failed to add memory image %s @ 0x%08x\n",
+                mem_path.c_str(), mem_base);
+        else
+            std::fprintf(stderr, "error: failed to add ELF %s\n", elf_path.c_str());
         return 1;
     }
     decoder->set_sink([&](const Element& e) {

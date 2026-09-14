@@ -10,7 +10,10 @@
 // SPDX-License-Identifier: MIT
 #include "cortrace/decoder.hpp"
 
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "cortrace/log.hpp"
 
@@ -20,6 +23,66 @@
 
 namespace cortrace {
 namespace {
+
+    // Parse the PT_LOAD program headers of a little-endian ELF32 into OpenCSD
+    // memory regions (file offset -> physical/load address, filesz bytes). Using
+    // the physical address (p_paddr) is what makes .data correct: its bytes live
+    // in flash (LMA) even though they run from RAM (VMA). Only ELF32-LE is
+    // supported (the Cortex-M target); returns false otherwise.
+    bool parse_elf_load_segments(const std::string& path, std::vector<ocsd_file_mem_region_t>& out)
+    {
+        std::FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f)
+            return false;
+        struct Closer {
+            std::FILE* f;
+            ~Closer() { std::fclose(f); }
+        } closer { f };
+
+        unsigned char e[52]; // ELF32 header size
+        if (std::fread(e, 1, sizeof e, f) != sizeof e)
+            return false;
+        if (!(e[0] == 0x7f && e[1] == 'E' && e[2] == 'L' && e[3] == 'F'))
+            return false;
+        if (e[4] != 1 /*ELFCLASS32*/ || e[5] != 1 /*ELFDATA2LSB*/)
+            return false;
+
+        auto rd32 = [](const unsigned char* p) -> uint32_t {
+            return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+                | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+        };
+        auto rd16 = [](const unsigned char* p) -> uint16_t {
+            return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+        };
+
+        const uint32_t phoff = rd32(&e[28]); // e_phoff
+        const uint16_t phentsize = rd16(&e[42]); // e_phentsize
+        const uint16_t phnum = rd16(&e[44]); // e_phnum
+        if (phoff == 0 || phnum == 0 || phentsize < 32)
+            return false;
+
+        for (uint16_t i = 0; i < phnum; ++i) {
+            unsigned char ph[32]; // ELF32 program header
+            if (std::fseek(f, static_cast<long>(phoff + i * phentsize), SEEK_SET) != 0)
+                return false;
+            if (std::fread(ph, 1, sizeof ph, f) != sizeof ph)
+                return false;
+            const uint32_t p_type = rd32(&ph[0]);
+            if (p_type != 1 /*PT_LOAD*/)
+                continue;
+            const uint32_t p_offset = rd32(&ph[4]);
+            const uint32_t p_paddr = rd32(&ph[12]); // load (physical) address
+            const uint32_t p_filesz = rd32(&ph[16]);
+            if (p_filesz == 0)
+                continue; // .bss-only segment: nothing in the file
+            ocsd_file_mem_region_t r;
+            r.file_offset = p_offset;
+            r.start_address = p_paddr;
+            r.region_size = p_filesz;
+            out.push_back(r);
+        }
+        return true;
+    }
 
     // Translate an OpenCSD instruction type/subtype pair into a cortrace BranchKind.
     BranchKind classify(ocsd_instr_type itype, ocsd_instr_subtype sub)
@@ -87,6 +150,27 @@ namespace {
             if (!ok_)
                 return false;
             return ocsd_dt_add_binfile_mem_acc(tree_, base, OCSD_MEM_SPACE_ANY, path.c_str())
+                == OCSD_OK;
+        }
+
+        bool add_elf(const std::string& path) override
+        {
+            if (!ok_)
+                return false;
+            std::vector<ocsd_file_mem_region_t> regions;
+            if (!parse_elf_load_segments(path, regions)) {
+                CT_LOG_ERROR("add_elf: could not parse PT_LOAD segments from %s", path.c_str());
+                return false;
+            }
+            if (regions.empty()) {
+                CT_LOG_ERROR("add_elf: no loadable segments in %s", path.c_str());
+                return false;
+            }
+            for (const auto& r : regions)
+                CT_LOG_DEBUG("add_elf region: off=0x%zx addr=0x%llx size=0x%zx", r.file_offset,
+                    static_cast<unsigned long long>(r.start_address), r.region_size);
+            return ocsd_dt_add_binfile_region_mem_acc(tree_, regions.data(),
+                       static_cast<int>(regions.size()), OCSD_MEM_SPACE_ANY, path.c_str())
                 == OCSD_OK;
         }
 

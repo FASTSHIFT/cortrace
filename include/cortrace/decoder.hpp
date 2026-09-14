@@ -50,7 +50,19 @@ public:
     // Register the memory image OpenCSD reads to follow the instruction flow.
     // `base` is the load address of `path`'s first byte (= lowest LMA of the
     // ELF; see AGENT.md gotcha #2 on the .isr_vector offset).
+    //
+    // PREFER add_elf(): a flat binary made with `objcopy -O binary` silently
+    // mis-lays-out any image whose sections have gaps or a load address (LMA)
+    // different from their virtual address (e.g. .data), so the bytes at a
+    // given address no longer match the program. add_elf reads each PT_LOAD
+    // segment at its own file offset and physical address, so it is always
+    // consistent with the build and needs no base argument.
     virtual bool add_memory_image(uint32_t base, const std::string& path) = 0;
+
+    // Register the program memory directly from an ELF, one region per PT_LOAD
+    // segment (file offset -> physical/load address, filesz bytes). This is the
+    // consistency-safe alternative to a flat binary. Returns false on failure.
+    virtual bool add_elf(const std::string& path) = 0;
 
     // Set the sink that receives normalised elements.
     virtual void set_sink(ElementSink sink) = 0;
