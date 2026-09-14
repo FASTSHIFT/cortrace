@@ -48,6 +48,12 @@ struct Element {
     // Exception fields
     uint32_t exception_number = 0; // ARM exception number (15 = SysTick)
 
+    // Timestamp fields (kind == Timestamp): the 64-bit global-timestamp value
+    // OpenCSD decoded from the ETM TIMESTAMP packet. This is the SoC TSGEN
+    // count sampled at execution time -- the anchor for a real (not
+    // ETF-egress) time base.
+    uint64_t timestamp = 0;
+
     // Provenance / timing
     uint64_t byte_index = 0; // source ETM byte offset (OpenCSD idx_sop)
 
@@ -77,6 +83,15 @@ struct Element {
     {
         Element e;
         e.kind = k;
+        e.byte_index = idx;
+        return e;
+    }
+
+    static Element make_timestamp(uint64_t ts, uint64_t idx = 0)
+    {
+        Element e;
+        e.kind = ElementKind::Timestamp;
+        e.timestamp = ts;
         e.byte_index = idx;
         return e;
     }

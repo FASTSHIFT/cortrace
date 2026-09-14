@@ -44,6 +44,15 @@ private:
 // back to monotonic tick ordering).
 std::vector<SliceEvent> apply_timebase(const std::vector<SliceEvent>& slices, const TimeBase& tb);
 
+// Return a copy of `slices` with each event's `tick` set from the ETM global
+// timestamp (SliceEvent.etm_ts, the SoC TSGEN count sampled at execution time).
+// If `tsgen_hz > 0` the count is converted to ns (count * 1e9 / hz); otherwise
+// the raw count is used as the tick. Timestamps are clamped non-decreasing so
+// the sequence is valid for Perfetto. This is the execution-time base, distinct
+// from apply_timebase's FPGA ETF-egress base.
+std::vector<SliceEvent> apply_etm_timestamp(
+    const std::vector<SliceEvent>& slices, double tsgen_hz = 0.0);
+
 } // namespace cortrace
 
 #endif // CORTRACE_TIMEBASE_HPP

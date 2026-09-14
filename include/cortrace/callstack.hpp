@@ -25,6 +25,7 @@ struct SliceEvent {
     bool begin; // true = slice begin, false = slice end
     std::string name; // function / ISR name
     int track = 0; // track id: 0 = main thread, >=1 = a per-exception ISR track
+    uint64_t etm_ts = 0; // most-recent ETM global timestamp seen before this event
 };
 
 // Aggregate quality/΄shape metrics produced during reconstruction.
@@ -100,6 +101,7 @@ private:
 
     uint64_t tick_ = 0;
     uint64_t last_byte_index_ = 0;
+    uint64_t last_etm_ts_ = 0; // most-recent ETM global timestamp value
     bool pending_call_ = false;
     uint32_t pending_ret_ = 0;
     bool after_blind_ = false;

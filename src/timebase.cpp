@@ -44,4 +44,23 @@ std::vector<SliceEvent> apply_timebase(const std::vector<SliceEvent>& slices, co
     return out;
 }
 
+std::vector<SliceEvent> apply_etm_timestamp(const std::vector<SliceEvent>& slices, double tsgen_hz)
+{
+    std::vector<SliceEvent> out = slices;
+    uint64_t last = 0;
+    for (auto& s : out) {
+        uint64_t t = s.etm_ts;
+        if (tsgen_hz > 0.0)
+            t = static_cast<uint64_t>(static_cast<double>(s.etm_ts) * 1e9 / tsgen_hz);
+        // Clamp non-decreasing: timestamps only refresh at TS packets, so many
+        // consecutive slices share a value; that is fine (equal ticks keep
+        // emission order), but a decode glitch must never move time backwards.
+        if (t < last)
+            t = last;
+        s.tick = t;
+        last = t;
+    }
+    return out;
+}
+
 } // namespace cortrace

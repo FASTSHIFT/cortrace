@@ -155,7 +155,7 @@ namespace {
                 emit(Element::simple(ElementKind::AddrNacc, bidx));
                 break;
             case OCSD_GEN_TRC_ELEM_TIMESTAMP:
-                emit(Element::simple(ElementKind::Timestamp, bidx));
+                emit(Element::make_timestamp(elem->timestamp, bidx));
                 break;
             default:
                 break;

@@ -90,10 +90,22 @@ struct Coverage {
         case ElementKind::TraceOn:
             blind_pending = true;
             break;
+        case ElementKind::Timestamp:
+            ts_count++;
+            if (!have_first_ts) {
+                first_ts = e.timestamp;
+                have_first_ts = true;
+            }
+            last_ts = e.timestamp;
+            break;
         default:
             break;
         }
     }
+
+    long ts_count = 0;
+    bool have_first_ts = false;
+    uint64_t first_ts = 0, last_ts = 0;
 };
 
 } // namespace
@@ -110,7 +122,17 @@ int main(int argc, char** argv)
     program.add_argument("mem_base").help("load address (hex) of mem's first byte, e.g. 08000000");
     program.add_argument("syms").help("ELF symbol table (arm-none-eabi-nm output)");
 
-    program.add_argument("--time").metavar("time.bin").help("ns-per-ETM-byte time base");
+    program.add_argument("--time")
+        .metavar("time.bin")
+        .help("FPGA ETF-egress ns-per-ETM-byte time base");
+    program.add_argument("--etm-time")
+        .flag()
+        .help("use the ETM global timestamp (execution time) as the Perfetto time base");
+    program.add_argument("--tsgen-hz")
+        .metavar("HZ")
+        .scan<'g', double>()
+        .default_value(0.0)
+        .help("TSGEN frequency for --etm-time count->ns (0 = raw counts as ticks)");
     program.add_argument("--perf").metavar("out.perftrace").help("write a Perfetto trace");
     program.add_argument("--edges").metavar("out.tsv").help("write call edges for ELF cross-check");
     program.add_argument("--events")
@@ -119,7 +141,7 @@ int main(int argc, char** argv)
     program.add_argument("--memory-limit-mb")
         .metavar("N")
         .scan<'i', long>()
-        .default_value<long>(2048)
+        .default_value<long>(4096)
         .help("cap virtual memory (0 disables); guards a libopencsd allocation blowup");
     program.add_argument("--strict").flag().help("exit 1 if ANY loss/patch heuristic fired");
     program.add_argument("--raw").flag().help(
@@ -150,6 +172,8 @@ int main(int argc, char** argv)
     const auto events_opt = program.present("--events");
     const char* time_path = time_opt ? time_opt->c_str() : nullptr;
     const char* perf_path = perf_opt ? perf_opt->c_str() : nullptr;
+    const bool etm_time = program.get<bool>("--etm-time");
+    const double tsgen_hz = program.get<double>("--tsgen-hz");
     const char* edges_path = edges_opt ? edges_opt->c_str() : nullptr;
     const char* events_path = events_opt ? events_opt->c_str() : nullptr;
 
@@ -313,6 +337,14 @@ int main(int argc, char** argv)
     std::fprintf(stderr, "  recovered returns   : %ld\n", m.recovered_missed_returns);
     std::fprintf(stderr, "  exceptions rendered : %ld\n", m.exceptions);
     std::fprintf(stderr, "  slice events        : %zu\n", machine.slices().size());
+    std::fprintf(stderr, "  ETM timestamps      : %ld", cov.ts_count);
+    if (cov.ts_count > 0) {
+        std::fprintf(stderr, "  (0x%llx .. 0x%llx, span %llu counts)",
+            static_cast<unsigned long long>(cov.first_ts),
+            static_cast<unsigned long long>(cov.last_ts),
+            static_cast<unsigned long long>(cov.last_ts - cov.first_ts));
+    }
+    std::fprintf(stderr, "\n");
 
     // ---- function-coverage report: flow-visited vs slice-rendered ----------
     // A function the instruction flow visited but that never rendered as a
@@ -362,13 +394,21 @@ int main(int argc, char** argv)
 
     // ---- outputs -----------------------------------------------------------
     if (perf_path) {
-        const auto timed = apply_timebase(machine.slices(), tb);
+        std::vector<SliceEvent> timed;
+        const char* base_desc;
+        if (etm_time) {
+            timed = apply_etm_timestamp(machine.slices(), tsgen_hz);
+            base_desc = tsgen_hz > 0.0 ? " (ETM timestamp, ns)" : " (ETM timestamp, raw counts)";
+        } else {
+            timed = apply_timebase(machine.slices(), tb);
+            base_desc = tb.empty() ? " (tick order; pass --time or --etm-time)" : " (ns time base)";
+        }
         if (!write_perfetto_trace_multi(perf_path, timed, machine.tracks())) {
             std::fprintf(stderr, "error: cannot write perf to %s\n", perf_path);
             return 1;
         }
-        std::fprintf(stderr, "\nwrote %zu slice events -> %s%s\n", timed.size(), perf_path,
-            tb.empty() ? " (tick order; pass --time for ns)" : " (ns time base)");
+        std::fprintf(
+            stderr, "\nwrote %zu slice events -> %s%s\n", timed.size(), perf_path, base_desc);
     }
     if (edges_path) {
         FILE* ef = std::fopen(edges_path, "w");

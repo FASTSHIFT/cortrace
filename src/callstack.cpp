@@ -53,7 +53,7 @@ CallStackMachine::CallStackMachine(const SymbolTable& syms)
 
 void CallStackMachine::emit(bool begin, const std::string& name)
 {
-    slices_.push_back({ tick_++, last_byte_index_, begin, name, cur().track });
+    slices_.push_back({ tick_++, last_byte_index_, begin, name, cur().track, last_etm_ts_ });
     if (begin) {
         begins_by_fn_[name]++;
         metrics_.begins++;
@@ -221,6 +221,11 @@ void CallStackMachine::process(const Element& e)
         break;
 
     case ElementKind::Timestamp:
+        // Record the execution-time anchor; subsequent slices carry it so the
+        // Perfetto time base can use real ETM time instead of ETF-egress time.
+        last_etm_ts_ = e.timestamp;
+        break;
+
     case ElementKind::Unknown:
         break;
     }

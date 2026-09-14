@@ -91,3 +91,54 @@ TEST(timebase_apply_is_non_decreasing)
     auto out = apply_timebase(slices, tb);
     CHECK(out[1].tick >= out[0].tick);
 }
+
+TEST(etm_timestamp_raw_counts_become_ticks)
+{
+    // With tsgen_hz=0 the raw TSGEN count is used directly as the tick.
+    // SliceEvent = { tick, byte_index, begin, name, track, etm_ts }.
+    std::vector<SliceEvent> slices = {
+        { 0, 0, true, "a", 0, 1000 },
+        { 0, 0, false, "a", 0, 2000 },
+    };
+    auto out = apply_etm_timestamp(slices, 0.0);
+    CHECK_EQ((long)out[0].tick, 1000L);
+    CHECK_EQ((long)out[1].tick, 2000L);
+}
+
+TEST(etm_timestamp_converts_counts_to_ns)
+{
+    // tsgen_hz set => tick = count * 1e9 / hz. At 1 MHz, 1 count = 1000 ns.
+    std::vector<SliceEvent> slices = {
+        { 0, 0, true, "a", 0, 1 },
+        { 0, 0, false, "a", 0, 5 },
+    };
+    auto out = apply_etm_timestamp(slices, 1e6);
+    CHECK_EQ((long)out[0].tick, 1000L);
+    CHECK_EQ((long)out[1].tick, 5000L);
+}
+
+TEST(etm_timestamp_clamps_non_decreasing)
+{
+    // A backwards TSGEN value (decode glitch) must never move time backwards.
+    std::vector<SliceEvent> slices = {
+        { 0, 0, true, "a", 0, 5000 }, { 0, 0, false, "a", 0, 4000 }, // must clamp up to >= 5000
+    };
+    auto out = apply_etm_timestamp(slices, 0.0);
+    CHECK(out[1].tick >= out[0].tick);
+    CHECK_EQ((long)out[1].tick, 5000L);
+}
+
+TEST(etm_timestamp_shared_value_keeps_order)
+{
+    // Many consecutive slices share one TS value (TS only refreshes at packets);
+    // equal ticks are fine and preserve emission order.
+    std::vector<SliceEvent> slices = {
+        { 0, 0, true, "a", 0, 7 },
+        { 0, 0, true, "b", 0, 7 },
+        { 0, 0, false, "b", 0, 7 },
+    };
+    auto out = apply_etm_timestamp(slices, 0.0);
+    CHECK_EQ((long)out[0].tick, 7L);
+    CHECK_EQ((long)out[1].tick, 7L);
+    CHECK_EQ((long)out[2].tick, 7L);
+}
