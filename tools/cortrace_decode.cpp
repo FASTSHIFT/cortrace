@@ -177,6 +177,11 @@ int main(int argc, char** argv)
         .help("with --raw, also write the deframed ETM bytes");
     program.add_argument("--phase").metavar("P,O").help(
         "lock the deframe phase (skip the search), e.g. 1,0 for the A7-Lite default");
+    program.add_argument("--want-stream")
+        .metavar("ID")
+        .scan<'i', int>()
+        .default_value(2)
+        .help("TPIU ATB stream to deframe (default 2 = ETM; 1 = DWT/ITM packets)");
     program.add_argument("--log-level")
         .metavar("LVL")
         .default_value(std::string("warn"))
@@ -247,6 +252,7 @@ int main(int argc, char** argv)
         phase_locked = true;
     }
     const bool raw_input = program.get<bool>("--raw") || phase_locked;
+    const int want_stream = program.get<int>("--want-stream");
 
     // Apply the memory cap before we allocate anything decoder-related.
     if (mem_limit_mb > 0) {
@@ -329,7 +335,7 @@ int main(int argc, char** argv)
         f = nullptr;
 
         DeframeResult dr = deframe_raw_capture(
-            capture.data(), got, /*want_stream=*/2, /*search=*/!phase_locked, phase);
+            capture.data(), got, want_stream, /*search=*/!phase_locked, phase);
         std::fprintf(stderr,
             "deframe: raw=%zu B -> etm=%zu B  phase=(parity=%d,order=%d)  "
             "A-syncs=%d  frames=%zu\n",
