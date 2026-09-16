@@ -5,6 +5,9 @@
 #include "test_framework.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace cortrace;
@@ -250,4 +253,107 @@ TEST(nxtrace_runs_to_slices_balanced)
     CHECK_EQ(ends, 2L);
     CHECK_EQ((long)sl[0].byte_index, 10L);
     CHECK_EQ((long)sl[1].byte_index, 20L);
+}
+
+TEST(nxtrace_load_tcb_map_parses_file)
+{
+    // Write a tcbmap file with a comment, a blank line, a malformed line, and
+    // two good entries (one with a name, one name-less).
+    const char* path = "/tmp/cortrace_test_tcbmap.txt";
+    {
+        std::ofstream f(path);
+        f << "# tcb\tpid\tname\n";
+        f << "\n";
+        f << "garbage-no-hex\n";
+        f << "0x38000a90\t2\tworker_compute\n";
+        f << "0x24000440\t0\t\n"; // name-less
+    }
+    auto m = load_tcb_map(path);
+    std::remove(path);
+
+    CHECK_EQ((long)m.size(), 2L);
+    // named entry -> "name (pid N)"
+    CHECK(m.count(0x38000a90u) == 1);
+    CHECK_EQ(m[0x38000a90u].tid, 2);
+    CHECK(m[0x38000a90u].name.find("worker_compute") != std::string::npos);
+    CHECK(m[0x38000a90u].name.find("pid 2") != std::string::npos);
+    // name-less entry -> pointer-formatted
+    CHECK(m.count(0x24000440u) == 1);
+    CHECK(m[0x24000440u].name.find("tcb@0x24000440") != std::string::npos);
+}
+
+TEST(nxtrace_load_tcb_map_missing_file_is_empty)
+{
+    auto m = load_tcb_map("/tmp/does_not_exist_cortrace_xyz.txt");
+    CHECK_EQ((long)m.size(), 0L);
+}
+
+TEST(nxtrace_nuttx_resolver_name_and_pid_branches)
+{
+    // reader returns pid+entry; entry resolves to a symbol -> "fn (pid N)".
+    SymbolTable syms;
+    syms.add(0x08002000, "worker_fileio");
+    syms.finalize();
+    auto reader = [](uint32_t addr, uint32_t& out) -> bool {
+        switch (addr) {
+        case 0x38001148 + 0x30:
+            out = 7;
+            return true; // pid
+        case 0x38001148 + 0x3C:
+            out = 0x08002010;
+            return true; // entry in worker_fileio
+        default:
+            return false;
+        }
+    };
+    NuttxResolver r(reader, syms);
+    ThreadId id = r(0x38001148);
+    CHECK_EQ(id.tid, 7);
+    CHECK(id.name.find("worker_fileio") != std::string::npos);
+    CHECK(id.name.find("pid 7") != std::string::npos);
+
+    // pid readable but entry not resolvable (no symbol / read fails) -> "pid N (tcb@..)"
+    SymbolTable empty;
+    empty.finalize();
+    auto reader_pid_only = [](uint32_t addr, uint32_t& out) -> bool {
+        if (addr == 0x30) {
+            out = 9;
+            return true;
+        } // pid at tcb 0
+        return false; // entry read fails
+    };
+    NuttxResolver r2(reader_pid_only, empty);
+    ThreadId id2 = r2(0x0);
+    CHECK_EQ(id2.tid, 9);
+    CHECK(id2.name.find("pid 9") != std::string::npos);
+}
+
+TEST(nxtrace_reattribute_gap_and_no_runs)
+{
+    // No runs: everything stays on its input track.
+    std::vector<ThreadRun> none;
+    std::vector<SliceEvent> etm(1);
+    etm[0].byte_index = 42;
+    etm[0].track = 0;
+    etm[0].begin = true;
+    std::map<int, std::string> tracks;
+    auto out0 = reattribute_slices_to_threads(etm, none, 2000, tracks);
+    CHECK_EQ(out0[0].track, 0);
+
+    // A slice in the gap AFTER the last run's end -> clamped, stays track 0.
+    std::vector<DwtEvent> ev;
+    DwtEvent e;
+    e.src_index = 10;
+    e.comparator = 0;
+    e.size = 4;
+    e.value = 0x20000100;
+    ev.push_back(e);
+    auto runs = build_thread_runs(ev, nullptr, 0, 20); // one run [10,20)
+    std::vector<SliceEvent> etm2(1);
+    etm2[0].byte_index = 50; // past last run end
+    etm2[0].track = 0;
+    etm2[0].begin = true;
+    std::map<int, std::string> tracks2;
+    auto out1 = reattribute_slices_to_threads(etm2, runs, 2000, tracks2);
+    CHECK_EQ(out1[0].track, 0);
 }

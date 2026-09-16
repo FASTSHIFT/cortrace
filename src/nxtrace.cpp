@@ -182,9 +182,10 @@ std::map<uint32_t, ThreadId> load_tcb_map(const std::string& path)
         if (line.empty() || line[0] == '#')
             continue;
         // fields: <hex tcb> \t <pid> \t <name>
+        const char* start = line.c_str();
         char* end = nullptr;
-        unsigned long tcb = std::strtoul(line.c_str(), &end, 0);
-        if (!end || *end == '\0')
+        unsigned long tcb = std::strtoul(start, &end, 0);
+        if (end == start || *end == '\0') // no number parsed, or no fields after
             continue;
         while (*end == ' ' || *end == '\t')
             ++end;
