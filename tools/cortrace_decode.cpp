@@ -18,6 +18,7 @@
 #include "cortrace/decoder.hpp"
 #include "cortrace/deframe.hpp"
 #include "cortrace/log.hpp"
+#include "cortrace/nxtrace.hpp"
 #include "cortrace/perfetto_writer.hpp"
 #include "cortrace/symbols.hpp"
 #include "cortrace/timebase.hpp"
@@ -31,6 +32,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -115,6 +117,95 @@ struct Coverage {
     uint64_t cc_total = 0; // summed CPU cycles
 };
 
+// Minimal read-only view of an ELF's PT_LOAD segments, for the NuttX resolver's
+// read_u32 (a static TCB's pid/entry come from the ELF image, never live
+// memory). Only what nxtrace needs: little-endian u32 at a virtual/load address
+// if some PT_LOAD segment's [p_paddr, p_paddr+p_filesz) covers it. Bytes beyond
+// p_filesz (NOBITS/.bss tail) are not backed -> read fails (resolver then falls
+// back to a pointer-named lane).
+class ElfImage {
+public:
+    bool load(const std::string& path)
+    {
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f)
+            return false;
+        std::fseek(f, 0, SEEK_END);
+        long sz = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (sz <= 0) {
+            std::fclose(f);
+            return false;
+        }
+        buf_.resize(static_cast<std::size_t>(sz));
+        std::size_t got = std::fread(buf_.data(), 1, buf_.size(), f);
+        std::fclose(f);
+        if (got != buf_.size())
+            return false;
+        return parse();
+    }
+
+    // Read a little-endian u32 at load address `addr` from a covering PT_LOAD.
+    bool read_u32(uint32_t addr, uint32_t& out) const
+    {
+        for (const auto& s : segs_) {
+            if (addr >= s.paddr && addr + 4 <= s.paddr + s.filesz) {
+                const uint8_t* p = &buf_[s.offset + (addr - s.paddr)];
+                out = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+                    | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    struct Seg {
+        uint32_t paddr, offset, filesz;
+    };
+
+    uint32_t rd32(std::size_t o) const
+    {
+        return static_cast<uint32_t>(buf_[o]) | (static_cast<uint32_t>(buf_[o + 1]) << 8)
+            | (static_cast<uint32_t>(buf_[o + 2]) << 16)
+            | (static_cast<uint32_t>(buf_[o + 3]) << 24);
+    }
+    uint16_t rd16(std::size_t o) const
+    {
+        return static_cast<uint16_t>(buf_[o]) | (static_cast<uint16_t>(buf_[o + 1]) << 8);
+    }
+
+    bool parse()
+    {
+        // ELF32 little-endian only (Cortex-M). Header: e_phoff@0x1C,
+        // e_phentsize@0x2A, e_phnum@0x2C. Program header (PT_LOAD=1):
+        // p_type@0, p_offset@4, p_paddr@0xC, p_filesz@0x10.
+        if (buf_.size() < 0x34 || buf_[0] != 0x7F || buf_[1] != 'E' || buf_[2] != 'L'
+            || buf_[3] != 'F' || buf_[4] != 1 /*ELFCLASS32*/)
+            return false;
+        const uint32_t phoff = rd32(0x1C);
+        const uint16_t phentsize = rd16(0x2A);
+        const uint16_t phnum = rd16(0x2C);
+        for (uint16_t i = 0; i < phnum; ++i) {
+            const std::size_t ph = phoff + static_cast<std::size_t>(i) * phentsize;
+            if (ph + 0x14 > buf_.size())
+                break;
+            if (rd32(ph) != 1 /*PT_LOAD*/)
+                continue;
+            Seg s;
+            s.offset = rd32(ph + 0x04);
+            s.paddr = rd32(ph + 0x0C);
+            s.filesz = rd32(ph + 0x10);
+            if (s.offset + s.filesz <= buf_.size())
+                segs_.push_back(s);
+        }
+        return !segs_.empty();
+    }
+
+    std::vector<uint8_t> buf_;
+    std::vector<Seg> segs_;
+};
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -182,6 +273,28 @@ int main(int argc, char** argv)
         .scan<'i', int>()
         .default_value(2)
         .help("TPIU ATB stream to deframe (default 2 = ETM; 1 = DWT/ITM packets)");
+    // nxtrace: RTOS thread-switch overlay from the DWT data-value stream.
+    program.add_argument("--nx-switch-stream")
+        .metavar("ID")
+        .scan<'i', int>()
+        .default_value(-1)
+        .help("enable nxtrace: TPIU stream carrying DWT current-task writes (e.g. 1). "
+              "Adds a 'Threads' track to the Perfetto output alongside ETM.");
+    program.add_argument("--nx-comp")
+        .metavar("N")
+        .scan<'i', int>()
+        .default_value(0)
+        .help("DWT comparator id that watches the current-task pointer (default 0)");
+    program.add_argument("--nx-tcb-pid-off")
+        .metavar("OFF")
+        .scan<'i', int>()
+        .default_value(0x30)
+        .help("byte offset of pid in struct tcb_s (default 0x30, DWARF-derived)");
+    program.add_argument("--nx-tcb-entry-off")
+        .metavar("OFF")
+        .scan<'i', int>()
+        .default_value(0x3C)
+        .help("byte offset of entry in struct tcb_s (default 0x3C, DWARF-derived)");
     program.add_argument("--log-level")
         .metavar("LVL")
         .default_value(std::string("warn"))
@@ -253,6 +366,11 @@ int main(int argc, char** argv)
     }
     const bool raw_input = program.get<bool>("--raw") || phase_locked;
     const int want_stream = program.get<int>("--want-stream");
+    const int nx_switch_stream = program.get<int>("--nx-switch-stream");
+    const bool nx_enabled = nx_switch_stream >= 0;
+    const uint8_t nx_comp = static_cast<uint8_t>(program.get<int>("--nx-comp"));
+    const uint32_t nx_pid_off = static_cast<uint32_t>(program.get<int>("--nx-tcb-pid-off"));
+    const uint32_t nx_entry_off = static_cast<uint32_t>(program.get<int>("--nx-tcb-entry-off"));
 
     // Apply the memory cap before we allocate anything decoder-related.
     if (mem_limit_mb > 0) {
@@ -322,8 +440,14 @@ int main(int argc, char** argv)
     std::size_t total = 0;
     bool fatal = false;
 
+    // nxtrace state: the deframed DWT stream + a map from DWT event src_index
+    // (into the assembled byte stream) to the ETM byte index the TimeBase uses.
+    std::vector<uint8_t> dwt_bytes;
+    std::vector<std::size_t> dwt_src;
+    std::vector<std::size_t> etm_src; // etm byte i came from assembled src etm_src[i]
+
     // --raw: read the whole capture, deframe it in-process (nibble reassemble +
-    // TPIU stream 2), then feed the resulting ETM bytes to the decoder. This
+    // TPIU demux), then feed the resulting ETM bytes to the decoder. This
     // replaces the slow host Python deframe_to_etm.py path.
     if (raw_input) {
         std::fseek(f, 0, SEEK_END);
@@ -334,24 +458,58 @@ int main(int argc, char** argv)
         std::fclose(f);
         f = nullptr;
 
-        DeframeResult dr = deframe_raw_capture(
-            capture.data(), got, want_stream, /*search=*/!phase_locked, phase);
-        std::fprintf(stderr,
-            "deframe: raw=%zu B -> etm=%zu B  phase=(parity=%d,order=%d)  "
-            "A-syncs=%d  frames=%zu\n",
-            got, dr.etm.size(), dr.phase.parity, dr.phase.order, dr.async_count, dr.frames);
+        std::vector<uint8_t> etm_bytes;
+        DeframePhase used_phase = phase;
+        int async_count = 0;
+        std::size_t frames = 0;
+
+        if (nx_enabled) {
+            // Multi-stream: demux ETM (want_stream) and the DWT stream in one
+            // pass so both share the assembled-byte space (-> one timeline).
+            MultiDeframeResult mr
+                = deframe_raw_capture_multi(capture.data(), got, /*search=*/!phase_locked, phase);
+            used_phase = mr.phase;
+            async_count = mr.async_count;
+            frames = mr.frames;
+            auto eit = mr.streams.find(want_stream);
+            if (eit != mr.streams.end()) {
+                etm_bytes = eit->second;
+                etm_src = mr.src_index[want_stream];
+            }
+            auto dit = mr.streams.find(nx_switch_stream);
+            if (dit != mr.streams.end()) {
+                dwt_bytes = dit->second;
+                dwt_src = mr.src_index[nx_switch_stream];
+            }
+            std::fprintf(stderr,
+                "deframe(multi): raw=%zu B -> etm[%d]=%zu B  dwt[%d]=%zu B  "
+                "phase=(parity=%d,order=%d)  A-syncs=%d  frames=%zu\n",
+                got, want_stream, etm_bytes.size(), nx_switch_stream, dwt_bytes.size(),
+                used_phase.parity, used_phase.order, async_count, frames);
+        } else {
+            DeframeResult dr = deframe_raw_capture(
+                capture.data(), got, want_stream, /*search=*/!phase_locked, phase);
+            etm_bytes = std::move(dr.etm);
+            used_phase = dr.phase;
+            async_count = dr.async_count;
+            frames = dr.frames;
+            std::fprintf(stderr,
+                "deframe: raw=%zu B -> etm=%zu B  phase=(parity=%d,order=%d)  "
+                "A-syncs=%d  frames=%zu\n",
+                got, etm_bytes.size(), used_phase.parity, used_phase.order, async_count, frames);
+        }
 
         if (dump_etm_path) {
             FILE* df = std::fopen(dump_etm_path, "wb");
             if (df) {
-                std::fwrite(dr.etm.data(), 1, dr.etm.size(), df);
+                std::fwrite(etm_bytes.data(), 1, etm_bytes.size(), df);
                 std::fclose(df);
                 std::fprintf(stderr, "wrote deframed ETM -> %s\n", dump_etm_path);
             }
         }
 
-        total = dr.etm.size();
-        if (!decoder->process(dr.etm.data(), dr.etm.size())) {
+        total = etm_bytes.size();
+        if (!decoder->process(etm_bytes.data(), etm_bytes.size())) {
             std::fprintf(stderr, "error: opencsd fatal while decoding deframed stream\n");
             fatal = true;
         }
@@ -451,6 +609,47 @@ int main(int argc, char** argv)
             stderr, "  BLIND RATE : %.2f%%  (covered %.2f%%)\n", blind_pct, 100.0 - blind_pct);
     }
 
+    // ---- nxtrace: RTOS thread-switch overlay -------------------------------
+    // Parse the DWT data-value stream into current-task writes, build thread-run
+    // intervals, resolve identities from the ELF image, and emit them as slices
+    // on a dedicated 'Threads' track. Each DWT event's assembled-byte src_index
+    // is mapped to the ETM byte index (via etm_src) so the Threads track shares
+    // the ETM timeline (--time / byte-index base).
+    std::vector<SliceEvent> nx_slices;
+    std::map<int, std::string> nx_tracks;
+    if (nx_enabled) {
+        auto dwt_events = parse_dwt_data_values(dwt_bytes, dwt_src);
+
+        // Map assembled src_index -> ETM byte index by binary search in etm_src
+        // (monotonic). Rewrite each event's src_index into ETM-byte space so
+        // thread_runs_to_slices' byte_index lines up with the ETM TimeBase.
+        auto to_etm_index = [&](std::size_t asm_src) -> std::size_t {
+            if (etm_src.empty())
+                return asm_src;
+            auto it = std::lower_bound(etm_src.begin(), etm_src.end(), asm_src);
+            return static_cast<std::size_t>(it - etm_src.begin());
+        };
+        for (auto& e : dwt_events)
+            e.src_index = to_etm_index(e.src_index);
+
+        ThreadResolver resolver;
+        ElfImage img;
+        const int nx_track_id = 1000; // high id so it never collides with ISR tracks
+        if (!elf_path.empty() && img.load(elf_path)) {
+            auto reader = [img](uint32_t addr, uint32_t& out) { return img.read_u32(addr, out); };
+            auto nx = std::make_shared<NuttxResolver>(reader, syms);
+            nx->set_offsets(nx_pid_off, nx_entry_off);
+            resolver = [nx](uint32_t v) { return (*nx)(v); };
+        }
+
+        std::size_t stream_end = etm_src.empty() ? total : etm_src.size();
+        auto runs = build_thread_runs(dwt_events, resolver, nx_comp, stream_end);
+        nx_slices = thread_runs_to_slices(runs, nx_track_id, nx_tracks);
+        std::fprintf(stderr,
+            "\n=== nxtrace ===\n  DWT stream %d: %zu bytes -> %zu switch events, %zu runs\n",
+            nx_switch_stream, dwt_bytes.size(), dwt_events.size(), runs.size());
+    }
+
     // ---- outputs -----------------------------------------------------------
     if (perf_path) {
         std::vector<SliceEvent> timed;
@@ -465,7 +664,18 @@ int main(int argc, char** argv)
             timed = apply_timebase(machine.slices(), tb);
             base_desc = tb.empty() ? " (tick order; pass --time or --etm-time)" : " (ns time base)";
         }
-        if (!write_perfetto_trace_multi(perf_path, timed, machine.tracks())) {
+
+        std::map<int, std::string> tracks = machine.tracks();
+        if (nx_enabled && !nx_slices.empty()) {
+            // Thread slices share the ETM byte-index space; time them on the
+            // same base and merge with the ETM callstack slices + track names.
+            std::vector<SliceEvent> nx_timed = apply_timebase(nx_slices, tb);
+            timed.insert(timed.end(), nx_timed.begin(), nx_timed.end());
+            for (const auto& kv : nx_tracks)
+                tracks[kv.first] = kv.second;
+        }
+
+        if (!write_perfetto_trace_multi(perf_path, timed, tracks)) {
             std::fprintf(stderr, "error: cannot write perf to %s\n", perf_path);
             return 1;
         }
