@@ -108,7 +108,11 @@ void CallStackMachine::do_return()
         emit(false, stack.back().fn);
         stack.pop_back();
     } else {
-        CT_LOG_WARN("mismatched return: stack near-empty at byte %llu (heuristic re-balanced)",
+        // Per-occurrence diagnostic: on a lossy/desynced stream these fire by
+        // the thousand, so keep them at DEBUG (silent by default). The total is
+        // reported once at end-of-decode (metrics_.mismatched_returns); use
+        // --log-level debug (redirect to a file) to see each byte offset.
+        CT_LOG_DEBUG("mismatched return: stack near-empty at byte %llu (heuristic re-balanced)",
             static_cast<unsigned long long>(last_byte_index_));
         metrics_.mismatched_returns++;
     }
@@ -151,8 +155,8 @@ void CallStackMachine::process(const Element& e)
             if (!after_blind_ && syms_.is_function_entry(start))
                 do_call(syms_.function_at(start), pending_ret_);
             else {
-                CT_LOG_WARN("dropped call at byte %llu: range starts 0x%x, not a function "
-                            "entry (callee lost to a blind spot)",
+                CT_LOG_DEBUG("dropped call at byte %llu: range starts 0x%x, not a function "
+                             "entry (callee lost to a blind spot)",
                     static_cast<unsigned long long>(last_byte_index_), start);
                 metrics_.dropped_calls++;
             }
@@ -240,7 +244,7 @@ void CallStackMachine::process(const Element& e)
         // fabricate flow across it. A call left pending here loses its callee.
         if (pending_call_) {
             pending_call_ = false;
-            CT_LOG_WARN("dropped call at byte %llu: pending call straddled a %s discontinuity",
+            CT_LOG_DEBUG("dropped call at byte %llu: pending call straddled a %s discontinuity",
                 static_cast<unsigned long long>(last_byte_index_),
                 e.kind == ElementKind::TraceOn ? "TraceOn" : "AddrNacc");
             metrics_.dropped_calls++;

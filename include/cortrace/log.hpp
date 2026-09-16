@@ -10,6 +10,12 @@
 // CLI flag (--log-level) via cortrace::log::set_level() / set_level_from_str().
 // There is deliberately no environment-variable coupling.
 //
+// CONVENTION: high-frequency PER-EVENT anomalies (mismatched return, dropped
+// call, ...) are logged at DEBUG so the default (Warn) never floods the CLI --
+// their COUNTS are in the end-of-decode summary. Use `--log-level debug`
+// (redirect stderr to a file) to see each occurrence. Reserve WARN/ERROR for
+// one-shot conditions the user must see (fatal decode, config problems).
+//
 // The macros are zero-overhead below the active level: the message expression
 // is only evaluated if it will be printed (the level check short-circuits
 // before the varargs are formatted).
