@@ -152,6 +152,35 @@ TEST(deframe_locked_phase_skips_search)
 // then to `s1` mid-frame. Even byte with LSB=1 is a stream id (id in bits[7:1]);
 // aux LSB byte kept 0 so no data-LSB or delayed-switch quirk. This mirrors how
 // the CoreSight formatter interleaves ETM(2) and ITM/DWT(1).
+TEST(deframe_assemble_width2_roundtrip)
+{
+    // Width-2: a TPIU byte spans 4 half-symbols (2 bits each), LSB-first, and
+    // two consecutive half-symbols pack into one capture byte as
+    // {trace_b(hi nibble) , trace_a(lo nibble)}. Build a capture that encodes
+    // known bytes and check assemble reconstructs them at phase 0, order lsb.
+    auto sym = [](uint8_t b, int j) { return (b >> (2 * j)) & 0x3; }; // half-symbol j of byte b
+    std::vector<uint8_t> want = { 0xE4, 0x1B, 0xFF, 0x00 };
+    std::vector<uint8_t> cap;
+    // half-symbol stream: for each byte, j=0..3 (trace_a then trace_b per cap byte)
+    std::vector<uint8_t> syms;
+    for (uint8_t b : want)
+        for (int j = 0; j < 4; ++j)
+            syms.push_back(sym(b, j));
+    // pack pairs: cap byte = trace_b<<4 | trace_a (upper 2 bits of each nibble = 0)
+    for (std::size_t k = 0; k + 1 < syms.size(); k += 2)
+        cap.push_back(static_cast<uint8_t>((syms[k + 1] << 4) | syms[k]));
+
+    DeframePhase p;
+    p.width = 2;
+    p.parity = 0;
+    p.order = 0;
+    auto out = assemble_nibbles(cap.data(), cap.size(), p);
+    // first want.size() bytes must match
+    CHECK(out.size() >= want.size());
+    for (std::size_t i = 0; i < want.size(); ++i)
+        CHECK_EQ((int)out[i], (int)want[i]);
+}
+
 TEST(deframe_multi_demuxes_all_streams)
 {
     // Frame: [id s0][d a][d b][d c] ... [id s1][d x][d y] ...

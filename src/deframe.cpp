@@ -35,9 +35,50 @@ int count_etmv4_async(const uint8_t* data, std::size_t len)
     return n;
 }
 
+// Width-generic reassembly (width 2 or 1). Port of host trace_width.py:
+// each capture byte = {trace_b hi-nibble, trace_a lo-nibble}; per TRACECLK the
+// time-ordered half-symbols are trace_a then trace_b, each `width` bits. A TPIU
+// byte spans 8/width half-symbols, filled LSB-first (upstream traceIF shift).
+// phase = leading half-symbols to drop; order 1 = reverse bits within a symbol.
+static std::vector<uint8_t> assemble_width(
+    const uint8_t* raw, std::size_t len, const DeframePhase& phase)
+{
+    const int width = phase.width;
+    const unsigned mask = (1u << width) - 1u;
+    std::vector<uint8_t> syms;
+    syms.reserve(2 * len);
+    for (std::size_t k = 0; k < len; ++k) {
+        syms.push_back(static_cast<uint8_t>(raw[k] & mask)); // trace_a (rising)
+        syms.push_back(static_cast<uint8_t>((raw[k] >> 4) & mask)); // trace_b (falling)
+    }
+    const int per_byte = 8 / width; // half-symbols per TPIU byte
+    const std::size_t start = static_cast<std::size_t>(phase.parity);
+    std::vector<uint8_t> out;
+    if (syms.size() > start)
+        out.reserve((syms.size() - start) / per_byte);
+    for (std::size_t k = start; k + per_byte <= syms.size(); k += per_byte) {
+        unsigned acc = 0;
+        for (int j = 0; j < per_byte; ++j) {
+            unsigned s = syms[k + j];
+            if (phase.order == 1 && width > 1) {
+                unsigned r = 0;
+                for (int b = 0; b < width; ++b)
+                    if (s & (1u << b))
+                        r |= 1u << (width - 1 - b);
+                s = r;
+            }
+            acc |= s << (width * j);
+        }
+        out.push_back(static_cast<uint8_t>(acc));
+    }
+    return out;
+}
+
 std::vector<uint8_t> assemble_nibbles(
     const uint8_t* raw, std::size_t len, const DeframePhase& phase)
 {
+    if (phase.width != 4)
+        return assemble_width(raw, len, phase);
     // nibble stream: for each raw byte pair, high nibble of raw[k] then low
     // nibble of raw[k+1] (the {trace_a hi, trace_b lo} capture cadence).
     std::vector<uint8_t> nibs;
@@ -191,13 +232,16 @@ DeframeResult deframe_raw_capture(
         return tpiu_deframe(data, want_stream, phase);
     }
 
-    // Try all four (parity, order) phases; keep the best by post-deframe
-    // A-sync count, tie-broken by deframed payload size.
+    // Search phases; keep the best by post-deframe A-sync count, tie-broken by
+    // deframed payload size. Phase count depends on width: 4-bit = 2 parity x 2
+    // order; width W = (8/W) byte-boundary phases x (W>1 ? 2 : 1) bit orders.
+    const int nphase = (phase.width == 4) ? 2 : (8 / phase.width);
+    const int norder = (phase.width == 1) ? 1 : 2;
     DeframeResult best;
     bool have_best = false;
-    for (int parity = 0; parity < 2; ++parity) {
-        for (int order = 0; order < 2; ++order) {
-            DeframePhase p { parity, order };
+    for (int parity = 0; parity < nphase; ++parity) {
+        for (int order = 0; order < norder; ++order) {
+            DeframePhase p { parity, order, phase.width };
             auto data = assemble_nibbles(raw, len, p);
             DeframeResult r = tpiu_deframe(data, want_stream, p);
             const bool better = !have_best || r.async_count > best.async_count
@@ -270,14 +314,16 @@ MultiDeframeResult deframe_raw_capture_multi(
         return tpiu_deframe_multi(data, phase);
     }
 
-    // Try all four phases; keep the one whose ETM stream (id 2) has the most
-    // A-syncs -- the ETM stream is the alignment anchor; the other streams ride
-    // the same frames/phase.
+    // Search phases (width-aware, see deframe_raw_capture); keep the one whose
+    // ETM stream (id 2) has the most A-syncs -- the ETM stream is the alignment
+    // anchor; the other streams ride the same frames/phase.
+    const int nphase = (phase.width == 4) ? 2 : (8 / phase.width);
+    const int norder = (phase.width == 1) ? 1 : 2;
     MultiDeframeResult best;
     bool have_best = false;
-    for (int parity = 0; parity < 2; ++parity) {
-        for (int order = 0; order < 2; ++order) {
-            DeframePhase p { parity, order };
+    for (int parity = 0; parity < nphase; ++parity) {
+        for (int order = 0; order < norder; ++order) {
+            DeframePhase p { parity, order, phase.width };
             auto data = assemble_nibbles(raw, len, p);
             MultiDeframeResult r = tpiu_deframe_multi(data, p);
             std::size_t etm_sz = 0;

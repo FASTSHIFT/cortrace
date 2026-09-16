@@ -268,6 +268,12 @@ int main(int argc, char** argv)
         .help("with --raw, also write the deframed ETM bytes");
     program.add_argument("--phase").metavar("P,O").help(
         "lock the deframe phase (skip the search), e.g. 1,0 for the A7-Lite default");
+    program.add_argument("--trace-width")
+        .metavar("W")
+        .scan<'i', int>()
+        .default_value(4)
+        .help("parallel TRACED port width: 4 (default), 2 or 1. Non-4 uses the "
+              "width-generic reassembly (8/W TRACECLK periods per TPIU byte).");
     program.add_argument("--want-stream")
         .metavar("ID")
         .scan<'i', int>()
@@ -359,6 +365,7 @@ int main(int argc, char** argv)
     // --phase P,O locks the deframe phase and implies --raw. Defaults to the
     // A7-Lite board (parity=1, order=0).
     DeframePhase phase;
+    phase.width = program.get<int>("--trace-width");
     bool phase_locked = false;
     if (auto phase_opt = program.present("--phase")) {
         const std::string& pv = *phase_opt;

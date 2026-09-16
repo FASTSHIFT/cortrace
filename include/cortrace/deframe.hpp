@@ -28,9 +28,17 @@ namespace cortrace {
 
 // Nibble-pairing phase. parity drops the leading nibble (0 or 1); order chooses
 // whether the first nibble of a pair is the low or high half of the byte.
+//
+// For non-4-bit parallel ports (width 2 or 1) the capture format is the same
+// (one byte per TRACECLK, {trace_b hi-nibble, trace_a lo-nibble}) but a TPIU
+// byte spans 8/(2*width) TRACECLK periods, so reassembly differs. When
+// width != 4, `parity` is reinterpreted as the byte-boundary phase
+// (0..8/width-1) and `order` as the within-half-symbol bit order (0=lsb,1=msb).
+// width == 4 keeps the original parity/order nibble-pairing exactly.
 struct DeframePhase {
     int parity = 1; // matches the A7-Lite board default (parity=1, order=0)
     int order = 0;
+    int width = 4; // parallel TRACED port width: 4, 2 or 1
 };
 
 struct DeframeResult {
