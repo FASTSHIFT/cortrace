@@ -23,6 +23,9 @@ enum class ElementKind {
     AddrNacc, // address not accessible: a decode blind spot
     Timestamp, // wall-clock / cycle timestamp marker
     CycleCount, // standalone cycle-count (cycles since last counted point)
+    NoSync, // decoder lost sync / resync point (overflow or bad-stream symptom)
+    Overflow, // explicit trace overflow (ETM/ETF dropped data)
+    OtherUnknown, // any other OpenCSD element we don't model (counted, not silent)
 };
 
 // Branch classification of the last instruction in an InstrRange. Derived from

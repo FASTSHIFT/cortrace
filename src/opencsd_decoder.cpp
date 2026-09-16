@@ -256,7 +256,20 @@ namespace {
             case OCSD_GEN_TRC_ELEM_TIMESTAMP:
                 emit(Element::make_timestamp(elem->timestamp, bidx));
                 break;
+            case OCSD_GEN_TRC_ELEM_NO_SYNC:
+                // Decoder lost sync -- the symptom of an ETM/ETF overflow or a
+                // corrupt/truncated stream. Do NOT swallow it: surface it so the
+                // report can tell the user the trace is lossy.
+                emit(Element::simple(ElementKind::NoSync, bidx));
+                break;
+            case OCSD_GEN_TRC_ELEM_EO_TRACE:
+                // End-of-trace marker; benign, but count it rather than drop.
+                emit(Element::simple(ElementKind::OtherUnknown, bidx));
+                break;
             default:
+                // Any element type we don't model is still counted (never
+                // silently dropped), so anomalies can't hide.
+                emit(Element::simple(ElementKind::OtherUnknown, bidx));
                 break;
             }
         }

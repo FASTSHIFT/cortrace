@@ -90,8 +90,23 @@ struct Coverage {
             break;
         }
         case ElementKind::AddrNacc:
-        case ElementKind::TraceOn:
+            nacc_count++;
             blind_pending = true;
+            break;
+        case ElementKind::TraceOn:
+            traceon_count++;
+            blind_pending = true;
+            break;
+        case ElementKind::NoSync:
+            nosync_count++; // decoder lost sync = overflow / corrupt-stream symptom
+            blind_pending = true;
+            break;
+        case ElementKind::Overflow:
+            overflow_count++;
+            blind_pending = true;
+            break;
+        case ElementKind::OtherUnknown:
+            other_count++;
             break;
         case ElementKind::Timestamp:
             ts_count++;
@@ -111,6 +126,13 @@ struct Coverage {
     }
 
     long ts_count = 0;
+    // Stream-health counters (never silently dropped): NO_SYNC is the overflow/
+    // corrupt-stream symptom; TraceOn is a resync; AddrNacc a decode blind spot.
+    long nosync_count = 0;
+    long overflow_count = 0;
+    long traceon_count = 0;
+    long nacc_count = 0;
+    long other_count = 0;
     bool have_first_ts = false;
     uint64_t first_ts = 0, last_ts = 0;
     long cc_count = 0; // elements carrying a cycle count
@@ -573,6 +595,18 @@ int main(int argc, char** argv)
             stderr, "  (%llu CPU cycles total)", static_cast<unsigned long long>(cov.cc_total));
     }
     std::fprintf(stderr, "\n");
+
+    // ---- stream health (overflow / resync / blind spots) -------------------
+    // NO_SYNC is the ETM/ETF overflow (or corrupt-stream) symptom; a nonzero
+    // count means the trace is LOSSY and the call graph downstream of each loss
+    // is unreliable. These are surfaced, never silently dropped.
+    const bool lossy = cov.nosync_count > 0 || cov.overflow_count > 0 || m.dropped_calls > 0;
+    std::fprintf(stderr,
+        "  stream health       : lost-sync=%ld overflow=%ld resync(TraceOn)=%ld "
+        "addr-nacc=%ld other=%ld  -> %s\n",
+        cov.nosync_count, cov.overflow_count, cov.traceon_count, cov.nacc_count, cov.other_count,
+        lossy ? "LOSSY (trace dropped data -- see gotchas: raise TRACECLK/widen port/lower CPU)"
+              : "clean");
 
     // ---- function-coverage report: flow-visited vs slice-rendered ----------
     // A function the instruction flow visited but that never rendered as a
