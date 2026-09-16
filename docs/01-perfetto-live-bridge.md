@@ -236,13 +236,14 @@ cortrace-live [capture opts] [decode opts] [ui opts]
 | 组件 | 改动 | 状态 |
 |------|------|------|
 | `cortrace/scripts/perfetto_open.py` | 宿主页 + postMessage 打开器（P0） | ✅ 已实现 |
+| `cortrace-fpga/host/scripts/cortrace_live.py` | 编排器：capture→decode→open（P2 核心） | ✅ 已实现 |
 | `cortrace/tools/cortrace_decode.cpp` | `--perf -` 写 stdout（或 `--perf-fd N`） | 待做（P1，免落盘管道） |
-| `cortrace-fpga/host/scripts/cortrace-live` | **新增**编排器 | 待做（P2，串采集/解码/浏览器） |
 | `cortrace-fpga/host/scripts/stream_grab.c` | 支持 `-`（stdout）输出 | 待做（P1，管道化） |
 | `nxtrace_dap.cfg` | 无需改 | `--arm` 复用现有 proc |
 
-P0 的 `perfetto_open.py` 已落地且不碰 C++ 核心；后续 `--perf -` 是唯一的 cortrace 核心
-改动，其余都在 host 脚本层，风险低。
+P0 的 `perfetto_open.py` 与 P2 核心 `cortrace_live.py` 已落地且不碰 C++ 核心（编排器只串
+既有件：`trace_ctrl.py` / `stream_grab` / `cortrace-decode` / `perfetto_open.py`）；后续
+`--perf -` 是唯一的 cortrace 核心改动，其余都在 host 脚本层，风险低。
 
 ---
 
@@ -271,18 +272,23 @@ P0 的 `perfetto_open.py` 已落地且不碰 C++ 核心；后续 `--perf -` 是�
 ```mermaid
 flowchart LR
     P0["P0 ✅ 已完成<br>perfetto_open.py：宿主页+postMessage<br>已有 .perfetto 一键出图（绕 PNA）"]
+    P2["P2 ✅ 核心完成<br>cortrace_live.py：capture→decode→open 一条命令"]
     P1["P1 管道化<br>cortrace-decode --perf - 免落盘"]
-    P2["P2 一键采集<br>--arm 复用 DAP + stream_grab 集成"]
     P3["P3 体验<br>--pin-threads startupCommands 预置视图"]
     P4["P4 大 trace<br>--big -> trace_processor server"]
-    P0 --> P1 --> P2 --> P3 --> P4
+    P0 --> P2 --> P1 --> P3 --> P4
 ```
 
-- **P0 ✅ 已完成（上板实测）**：`scripts/perfetto_open.py` 用宿主页 + postMessage，喂已有
-  `.perfetto` 文件即一键在浏览器出图，消灭"手动拖文件"这个最大痛点。不碰 C++ 核心。
+- **P0 ✅ 已完成（上板实测）**：`cortrace/scripts/perfetto_open.py` 用宿主页 + postMessage，
+  喂已有 `.perfetto` 文件即一键在浏览器出图，消灭"手动拖文件"这个最大痛点。不碰 C++ 核心。
   过程中定位并绕开了 Chrome PNA（§2.1/§2.2）。线程名由解码侧 `--nx-tcbmap` 提供，与本
   脚本正交。
-- **P1** 之后彻底免落盘。
+- **P2 ✅ 核心完成（上板实测）**：`cortrace-fpga/host/scripts/cortrace_live.py` 一条命令串起
+  set-width → stream_grab → cortrace-decode → perfetto_open。已实测 `--raw-in` 复现与真实
+  1s 抓包两条路径（decode clean、tcbmap 线程名、产出 perfetto）。**不含 arm**：DAP-only
+  bring-up 是一次性常驻会话（保持 C_DEBUGEN=1），单独 arm 并保持连接，编排器只对已 arm 的
+  硬件抓包。
+- **P1** 之后彻底免落盘（`--perf -` 管道，去掉中间 .bin/.perfetto 落盘）。
 - **P4** 独立，等 trace 真的变大再做。
 
 ### 7.1 P0 用法（已可用）
@@ -302,6 +308,28 @@ python3 cortrace/scripts/perfetto_open.py out.perfetto
 ```
 
 若浏览器拦了弹窗，宿主页会显示一个按钮，点一下即打开 UI 并加载 trace。
+
+### 7.2 P2 编排器 `cortrace_live`（一条命令：抓+解+出图）
+
+前置：DAP-only trace 已 arm 且会话常驻（`nxtrace_dap.cfg`）；线程名需先用
+`nx_tcbmap.py` 从活板 dump 一份 map。
+
+```bash
+# 真实抓包 1s -> 解码 -> 浏览器出图
+python3 cortrace-fpga/host/scripts/cortrace_live.py \
+    --secs 1 --sudo --width 4 \
+    --elf nuttx_test/nuttx/nuttx --sysclk-hz 150000000 \
+    --nx-switch-stream 1 --nx-tcbmap /tmp/tcbmap.txt --keep
+
+# 离线复现已有 raw（不抓包）
+python3 cortrace-fpga/host/scripts/cortrace_live.py \
+    --raw-in capture.bin --elf nuttx_test/nuttx/nuttx \
+    --sysclk-hz 150000000 --nx-tcbmap /tmp/tcbmap.txt
+```
+
+常用开关：`--width {4,2,1}`（顺带设 FPGA 端口宽）、`--time-base cycle|etm`、
+`--save out.perfetto`（额外落盘）、`--no-open`（只解码不开浏览器）、`--keep`（送达后常驻）。
+`--sudo` 让 `stream_grab` 以 root 抓原始网卡（免密需预热 sudo 或配 sudoers）。
 
 ---
 
