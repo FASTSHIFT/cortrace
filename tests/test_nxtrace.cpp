@@ -123,6 +123,40 @@ TEST(nxtrace_build_thread_runs_intervals)
     CHECK(runs[0].id.tid != runs[1].id.tid);
 }
 
+TEST(nxtrace_nuttx_resolver_names_thread)
+{
+    // Fake ELF image: a static TCB at 0x24000400 with pid=5 at +0x30 and
+    // entry=0x08001234 at +0x3C. Symbol table maps 0x08001234 -> hello_main.
+    SymbolTable syms;
+    syms.add(0x08001200, "other_fn");
+    syms.add(0x08001234, "hello_main");
+    syms.finalize();
+
+    auto reader = [](uint32_t addr, uint32_t& out) -> bool {
+        switch (addr) {
+        case 0x24000400 + 0x30:
+            out = 5;
+            return true; // pid
+        case 0x24000400 + 0x3C:
+            out = 0x08001240;
+            return true; // entry (inside hello_main)
+        default:
+            return false; // not backed by the image
+        }
+    };
+    NuttxResolver resolve(reader, syms);
+
+    ThreadId id = resolve(0x24000400);
+    CHECK_EQ(id.tid, 5);
+    // name contains the resolved function and pid
+    CHECK(id.name.find("hello_main") != std::string::npos);
+    CHECK(id.name.find("pid 5") != std::string::npos);
+
+    // A dynamically-allocated TCB not in the image -> pointer-formatted.
+    ThreadId dyn = resolve(0x30001000);
+    CHECK(dyn.name.find("tcb@0x30001000") != std::string::npos);
+}
+
 TEST(nxtrace_runs_to_slices_balanced)
 {
     std::vector<DwtEvent> ev;

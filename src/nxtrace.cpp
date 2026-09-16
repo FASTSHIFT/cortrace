@@ -110,13 +110,11 @@ namespace {
 } // namespace
 
 std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
-    ThreadId (*resolve)(uint32_t), uint8_t watch_comp, std::size_t stream_end_src)
+    const ThreadResolver& resolve, uint8_t watch_comp, std::size_t stream_end_src)
 {
-    if (!resolve)
-        resolve = default_resolve;
+    ThreadResolver rs = resolve ? resolve : ThreadResolver(default_resolve);
 
     std::vector<ThreadRun> runs;
-    const ThreadRun* prev = nullptr;
     for (const auto& e : events) {
         if (e.comparator != watch_comp)
             continue;
@@ -126,13 +124,44 @@ std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
         r.begin_src = e.src_index;
         r.end_src = e.src_index; // left open until the next switch
         r.tcb = e.value;
-        r.id = resolve(e.value);
+        r.id = rs(e.value);
         runs.push_back(r);
-        (void)prev;
     }
     if (!runs.empty() && stream_end_src > runs.back().begin_src)
         runs.back().end_src = stream_end_src;
     return runs;
+}
+
+ThreadId NuttxResolver::operator()(uint32_t tcb) const
+{
+    ThreadId t;
+    uint32_t pid = 0, entry = 0;
+    const bool have_pid = read_u32_ && read_u32_(tcb + pid_off_, pid);
+    const bool have_entry = read_u32_ && read_u32_(tcb + entry_off_, entry);
+
+    if (have_pid)
+        t.tid = static_cast<int>(pid);
+    else
+        t.tid = static_cast<int>((tcb >> 3) & 0x7FFF); // fallback: fold pointer
+
+    std::string fn;
+    if (have_entry && syms_ && !syms_->empty())
+        fn = syms_->function_at(entry);
+
+    char buf[64];
+    if (!fn.empty() && fn != "?") {
+        if (have_pid)
+            std::snprintf(buf, sizeof(buf), "%s (pid %u)", fn.c_str(), pid);
+        else
+            std::snprintf(buf, sizeof(buf), "%s", fn.c_str());
+    } else if (have_pid) {
+        std::snprintf(buf, sizeof(buf), "pid %u (tcb@0x%08x)", pid, tcb);
+    } else {
+        // dynamically-allocated TCB not in the ELF image: format the pointer.
+        std::snprintf(buf, sizeof(buf), "tcb@0x%08x", tcb);
+    }
+    t.name = buf;
+    return t;
 }
 
 std::vector<SliceEvent> thread_runs_to_slices(

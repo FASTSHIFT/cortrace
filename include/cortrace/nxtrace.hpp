@@ -26,9 +26,11 @@
 #define CORTRACE_NXTRACE_HPP
 
 #include "cortrace/callstack.hpp"
+#include "cortrace/symbols.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -68,14 +70,50 @@ struct ThreadRun {
     ThreadId id;
 };
 
+// Maps a captured current-task pointer to a thread identity.
+using ThreadResolver = std::function<ThreadId(uint32_t value)>;
+
 // Turn a sequence of DWT switch events (each carrying the new current-task
 // pointer) into thread-run intervals. `resolve` maps a captured pointer to a
-// ThreadId; if null, a default pointer-formatting resolver is used. Only events
+// ThreadId; if empty, a default pointer-formatting resolver is used. Only events
 // on comparator `watch_comp` are treated as switches (default 0). The last run
 // is left open (end_src == begin_src) unless `stream_end_src` is given.
 std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
-    ThreadId (*resolve)(uint32_t value) = nullptr, uint8_t watch_comp = 0,
-    std::size_t stream_end_src = 0);
+    const ThreadResolver& resolve = {}, uint8_t watch_comp = 0, std::size_t stream_end_src = 0);
+
+// NuttX thread-identity resolver (doc §4): given a captured TCB pointer, read
+// pid (offset 0x30) and entry (offset 0x3C) from the ELF program image (static
+// TCBs live in an ELF PT_LOAD segment), and resolve the entry pointer to a
+// function name via the symbol table. Purely static -- no live-memory read-back,
+// no UAF. `read_u32(addr, out)` supplies a little-endian 32-bit word from the
+// ELF image at a target address, returning false if the address is not backed
+// by the image (e.g. a dynamically-malloc'd TCB) -- in which case the pointer is
+// formatted as-is. TCB field offsets are overridable (DWARF-derived per build).
+class NuttxResolver {
+public:
+    using ReadU32 = std::function<bool(uint32_t addr, uint32_t& out)>;
+
+    NuttxResolver(ReadU32 read_u32, const SymbolTable& syms)
+        : read_u32_(std::move(read_u32))
+        , syms_(&syms)
+    {
+    }
+
+    // TCB field offsets (bytes). Defaults are the on-board ELF values (doc §4).
+    void set_offsets(uint32_t pid_off, uint32_t entry_off)
+    {
+        pid_off_ = pid_off;
+        entry_off_ = entry_off;
+    }
+
+    ThreadId operator()(uint32_t tcb) const;
+
+private:
+    ReadU32 read_u32_;
+    const SymbolTable* syms_;
+    uint32_t pid_off_ = 0x30;
+    uint32_t entry_off_ = 0x3C;
+};
 
 // Emit thread-run intervals as Perfetto slice events on a single "Threads"
 // track (track id `track`), one slice per run named by the resolved thread.
