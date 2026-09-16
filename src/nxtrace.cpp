@@ -238,4 +238,49 @@ std::vector<SliceEvent> thread_runs_to_slices(
     return slices;
 }
 
+std::vector<SliceEvent> reattribute_slices_to_threads(const std::vector<SliceEvent>& etm_slices,
+    const std::vector<ThreadRun>& runs, int base_track, std::map<int, std::string>& track_names)
+{
+    // Assign each distinct thread (by tid) a consecutive per-thread track id.
+    std::map<int, int> tid_to_track; // ThreadId.tid -> Perfetto track id
+    int next_track = base_track;
+    for (const auto& r : runs) {
+        if (tid_to_track.find(r.id.tid) == tid_to_track.end()) {
+            int trk = next_track++;
+            tid_to_track[r.id.tid] = trk;
+            track_names[trk] = r.id.name;
+        }
+    }
+
+    // runs are sorted by begin_src; binary-search the run covering a byte_index.
+    std::vector<uint64_t> starts;
+    starts.reserve(runs.size());
+    for (const auto& r : runs)
+        starts.push_back(r.begin_src);
+
+    auto track_for_byte = [&](uint64_t bidx, int fallback) -> int {
+        if (runs.empty())
+            return fallback;
+        auto it = std::upper_bound(starts.begin(), starts.end(), bidx);
+        if (it == starts.begin())
+            return fallback; // before the first switch: leave as-is
+        std::size_t idx = static_cast<std::size_t>(it - starts.begin()) - 1;
+        const ThreadRun& r = runs[idx];
+        if (bidx >= r.end_src)
+            return fallback; // in a gap between runs
+        auto tit = tid_to_track.find(r.id.tid);
+        return tit == tid_to_track.end() ? fallback : tit->second;
+    };
+
+    std::vector<SliceEvent> out = etm_slices;
+    for (auto& s : out) {
+        // Only re-attribute the main-thread call stack (track 0). Leave ISR
+        // tracks (>0, allocated by the call-stack machine) untouched so IRQs
+        // keep their own lanes.
+        if (s.track == 0)
+            s.track = track_for_byte(s.byte_index, 0);
+    }
+    return out;
+}
+
 } // namespace cortrace

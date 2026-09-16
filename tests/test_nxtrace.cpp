@@ -176,6 +176,48 @@ TEST(nxtrace_resolver_prefers_tcb_map)
     CHECK(miss.name.find("tcb@0x38009999") != std::string::npos);
 }
 
+TEST(nxtrace_reattributes_callstack_per_thread)
+{
+    // Two thread runs: TCB A [10,20), TCB B [20,30). ETM call-stack slices at
+    // byte 12 (in A) and byte 25 (in B) must land on different per-thread
+    // tracks; a slice at byte 5 (before any switch) stays on track 0.
+    std::vector<DwtEvent> ev;
+    auto mk = [](std::size_t src, uint32_t v) {
+        DwtEvent e;
+        e.src_index = src;
+        e.comparator = 0;
+        e.size = 4;
+        e.value = v;
+        return e;
+    };
+    ev.push_back(mk(10, 0x20000100));
+    ev.push_back(mk(20, 0x20000200));
+    auto runs = build_thread_runs(ev, nullptr, 0, 30);
+
+    std::vector<SliceEvent> etm;
+    auto sl = [](uint64_t bidx, bool begin, int track) {
+        SliceEvent s;
+        s.byte_index = bidx;
+        s.begin = begin;
+        s.track = track;
+        s.name = "fn";
+        return s;
+    };
+    etm.push_back(sl(5, true, 0)); // before first switch -> stays track 0
+    etm.push_back(sl(12, true, 0)); // in run A
+    etm.push_back(sl(25, true, 0)); // in run B
+    etm.push_back(sl(13, true, 3)); // an ISR slice (track 3) -> untouched
+
+    std::map<int, std::string> tracks;
+    auto out = reattribute_slices_to_threads(etm, runs, 2000, tracks);
+    CHECK_EQ((long)out.size(), 4L);
+    CHECK_EQ(out[0].track, 0); // before switch
+    CHECK(out[1].track >= 2000); // run A thread track
+    CHECK(out[2].track >= 2000); // run B thread track
+    CHECK(out[1].track != out[2].track); // A and B on different tracks
+    CHECK_EQ(out[3].track, 3); // ISR track preserved
+}
+
 TEST(nxtrace_runs_to_slices_balanced)
 {
     std::vector<DwtEvent> ev;

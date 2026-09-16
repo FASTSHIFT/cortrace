@@ -621,6 +621,7 @@ int main(int argc, char** argv)
     // the ETM timeline (--time / byte-index base).
     std::vector<SliceEvent> nx_slices;
     std::map<int, std::string> nx_tracks;
+    std::vector<ThreadRun> nx_runs;
     if (nx_enabled) {
         auto dwt_events = parse_dwt_data_values(dwt_bytes, dwt_src);
 
@@ -653,11 +654,11 @@ int main(int argc, char** argv)
         }
 
         std::size_t stream_end = etm_src.empty() ? total : etm_src.size();
-        auto runs = build_thread_runs(dwt_events, resolver, nx_comp, stream_end);
-        nx_slices = thread_runs_to_slices(runs, nx_track_id, nx_tracks);
+        nx_runs = build_thread_runs(dwt_events, resolver, nx_comp, stream_end);
+        nx_slices = thread_runs_to_slices(nx_runs, nx_track_id, nx_tracks);
         std::fprintf(stderr,
             "\n=== nxtrace ===\n  DWT stream %d: %zu bytes -> %zu switch events, %zu runs\n",
-            nx_switch_stream, dwt_bytes.size(), dwt_events.size(), runs.size());
+            nx_switch_stream, dwt_bytes.size(), dwt_events.size(), nx_runs.size());
     }
 
     // ---- outputs -----------------------------------------------------------
@@ -677,13 +678,22 @@ int main(int argc, char** argv)
 
         std::map<int, std::string> tracks = machine.tracks();
         if (nx_enabled && !nx_slices.empty()) {
+            // Re-attribute the ETM call-stack to per-thread tracks: each slice
+            // moves to the lane of whichever RTOS thread was running at its
+            // byte_index, so every thread shows its OWN call stack instead of
+            // all stacks piling onto one "main thread" lane. ISR tracks are
+            // left as-is. Per-thread tracks start at 2000 (clear of ISR ids and
+            // the Threads summary track at 1000).
+            const int nx_thread_base = 2000;
+            timed = reattribute_slices_to_threads(timed, nx_runs, nx_thread_base, tracks);
+
             // Thread slices carry an ETM byte_index but no cycle_clock/etm_ts of
             // their own, so apply_cycle_time/apply_etm_timestamp can't time them
             // directly. Instead ride the SAME execution-time base as the ETM
-            // callstack: build a (byte_index -> tick) table from the already-
-            // timed ETM slices and map each thread slice's byte_index through it
-            // (nearest preceding anchor). This puts threads on ETM execution
-            // time, NOT the lagging FPGA ETF-egress time.
+            // callstack: build a (byte_index -> tick) table from the timed ETM
+            // slices and map each thread slice's byte_index through it (nearest
+            // preceding anchor). This puts the Threads summary track on ETM
+            // execution time, NOT the lagging FPGA ETF-egress time.
             std::vector<std::pair<uint64_t, uint64_t>> anchors; // (byte_index, tick)
             anchors.reserve(timed.size());
             for (const auto& s : timed)

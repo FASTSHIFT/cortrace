@@ -132,6 +132,20 @@ std::map<uint32_t, ThreadId> load_tcb_map(const std::string& path);
 std::vector<SliceEvent> thread_runs_to_slices(
     const std::vector<ThreadRun>& runs, int track, std::map<int, std::string>& track_names);
 
+// Re-attribute ETM call-stack slices to per-thread tracks: each input slice is
+// moved to the track of whichever thread run (by byte_index) was executing when
+// it occurred, so every RTOS thread gets its OWN swim-lane showing its own call
+// stack (instead of all call stacks piling onto one "main thread" track).
+// `runs` must be sorted by begin_src (build_thread_runs output is). `base_track`
+// is the first per-thread track id; distinct threads (by ThreadId.tid) get
+// consecutive ids from there. ISR slices (track != 0 in the input, i.e. the
+// call-stack machine's exception tracks) are left on their own tracks. Fills
+// `track_names` with "<thread name>" per allocated track. Slices whose
+// byte_index falls in no run (before the first switch) stay on their input
+// track. Returns the re-tracked slices (input order preserved).
+std::vector<SliceEvent> reattribute_slices_to_threads(const std::vector<SliceEvent>& etm_slices,
+    const std::vector<ThreadRun>& runs, int base_track, std::map<int, std::string>& track_names);
+
 } // namespace cortrace
 
 #endif // CORTRACE_NXTRACE_HPP
