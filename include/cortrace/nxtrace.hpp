@@ -106,6 +106,11 @@ public:
         entry_off_ = entry_off;
     }
 
+    // Optionally supply a tcb -> (pid, name) map dumped from the live target
+    // (doc §4.3 path 2, nx_tcbmap.py), used for heap-allocated TCBs whose
+    // pid/entry are not in the ELF image. Consulted BEFORE the ELF read.
+    void set_tcb_map(std::map<uint32_t, ThreadId> m) { tcb_map_ = std::move(m); }
+
     ThreadId operator()(uint32_t tcb) const;
 
 private:
@@ -113,7 +118,12 @@ private:
     const SymbolTable* syms_;
     uint32_t pid_off_ = 0x30;
     uint32_t entry_off_ = 0x3C;
+    std::map<uint32_t, ThreadId> tcb_map_;
 };
+
+// Load a tcb->name map file (lines: "0xTCB<TAB>pid<TAB>name", '#' comments) as
+// produced by nx_tcbmap.py. Returns tcb -> ThreadId{tid=pid, name}.
+std::map<uint32_t, ThreadId> load_tcb_map(const std::string& path);
 
 // Emit thread-run intervals as Perfetto slice events on a single "Threads"
 // track (track id `track`), one slice per run named by the resolved thread.

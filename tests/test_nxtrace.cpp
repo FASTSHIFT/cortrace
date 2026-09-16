@@ -157,6 +157,25 @@ TEST(nxtrace_nuttx_resolver_names_thread)
     CHECK(dyn.name.find("tcb@0x30001000") != std::string::npos);
 }
 
+TEST(nxtrace_resolver_prefers_tcb_map)
+{
+    SymbolTable syms;
+    syms.finalize();
+    // resolver with no ELF reader; the map supplies identities for heap TCBs.
+    NuttxResolver resolve(nullptr, syms);
+    std::map<uint32_t, ThreadId> m;
+    m[0x38000a10] = ThreadId { 2, "nxtrace_churn (pid 2)" };
+    resolve.set_tcb_map(m);
+
+    ThreadId hit = resolve(0x38000a10);
+    CHECK_EQ(hit.tid, 2);
+    CHECK(hit.name.find("nxtrace_churn") != std::string::npos);
+
+    // a TCB not in the map falls back to pointer formatting
+    ThreadId miss = resolve(0x38009999);
+    CHECK(miss.name.find("tcb@0x38009999") != std::string::npos);
+}
+
 TEST(nxtrace_runs_to_slices_balanced)
 {
     std::vector<DwtEvent> ev;

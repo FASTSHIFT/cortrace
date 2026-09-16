@@ -4,6 +4,10 @@
 #include "cortrace/nxtrace.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
 
 namespace cortrace {
 
@@ -134,6 +138,11 @@ std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
 
 ThreadId NuttxResolver::operator()(uint32_t tcb) const
 {
+    // Live-target map first (covers heap TCBs not in the ELF image).
+    auto mit = tcb_map_.find(tcb);
+    if (mit != tcb_map_.end())
+        return mit->second;
+
     ThreadId t;
     uint32_t pid = 0, entry = 0;
     const bool have_pid = read_u32_ && read_u32_(tcb + pid_off_, pid);
@@ -162,6 +171,42 @@ ThreadId NuttxResolver::operator()(uint32_t tcb) const
     }
     t.name = buf;
     return t;
+}
+
+std::map<uint32_t, ThreadId> load_tcb_map(const std::string& path)
+{
+    std::map<uint32_t, ThreadId> m;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        // fields: <hex tcb> \t <pid> \t <name>
+        char* end = nullptr;
+        unsigned long tcb = std::strtoul(line.c_str(), &end, 0);
+        if (!end || *end == '\0')
+            continue;
+        while (*end == ' ' || *end == '\t')
+            ++end;
+        long pid = std::strtol(end, &end, 10);
+        while (*end == ' ' || *end == '\t')
+            ++end;
+        std::string name = end;
+        while (!name.empty()
+            && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '
+                || name.back() == '\t'))
+            name.pop_back();
+        ThreadId id;
+        id.tid = static_cast<int>(pid);
+        char buf[80];
+        if (!name.empty())
+            std::snprintf(buf, sizeof(buf), "%s (pid %ld)", name.c_str(), pid);
+        else
+            std::snprintf(buf, sizeof(buf), "pid %ld (tcb@0x%08lx)", pid, tcb);
+        id.name = buf;
+        m[static_cast<uint32_t>(tcb)] = id;
+    }
+    return m;
 }
 
 std::vector<SliceEvent> thread_runs_to_slices(

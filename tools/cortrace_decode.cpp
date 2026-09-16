@@ -295,6 +295,10 @@ int main(int argc, char** argv)
         .scan<'i', int>()
         .default_value(0x3C)
         .help("byte offset of entry in struct tcb_s (default 0x3C, DWARF-derived)");
+    program.add_argument("--nx-tcbmap")
+        .metavar("FILE")
+        .help("tcb->name map from the live target (nx_tcbmap.py) for heap TCBs "
+              "not in the ELF image (doc §4.3)");
     program.add_argument("--log-level")
         .metavar("LVL")
         .default_value(std::string("warn"))
@@ -639,6 +643,12 @@ int main(int argc, char** argv)
             auto reader = [img](uint32_t addr, uint32_t& out) { return img.read_u32(addr, out); };
             auto nx = std::make_shared<NuttxResolver>(reader, syms);
             nx->set_offsets(nx_pid_off, nx_entry_off);
+            if (auto tcbmap_opt = program.present("--nx-tcbmap")) {
+                auto m = load_tcb_map(*tcbmap_opt);
+                std::fprintf(stderr, "nxtrace: loaded %zu TCB map entries from %s\n", m.size(),
+                    tcbmap_opt->c_str());
+                nx->set_tcb_map(std::move(m));
+            }
             resolver = [nx](uint32_t v) { return (*nx)(v); };
         }
 
