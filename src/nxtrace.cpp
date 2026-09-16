@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MIT
 #include "cortrace/nxtrace.hpp"
 
+#include <cstdio>
+
 namespace cortrace {
 
 namespace {
@@ -89,6 +91,77 @@ std::vector<DwtEvent> parse_dwt_data_values(
         ++i;
     }
     return out;
+}
+
+namespace {
+    // Default resolver: no target memory / ELF, just format the pointer. The
+    // tid is derived from the pointer so the same TCB maps to the same track.
+    ThreadId default_resolve(uint32_t value)
+    {
+        ThreadId t;
+        // Fold the pointer to a small stable id (low bits are enough to
+        // separate the handful of concurrent TCBs in practice).
+        t.tid = static_cast<int>((value >> 3) & 0x7FFF);
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "tcb@0x%08x", value);
+        t.name = buf;
+        return t;
+    }
+} // namespace
+
+std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
+    ThreadId (*resolve)(uint32_t), uint8_t watch_comp, std::size_t stream_end_src)
+{
+    if (!resolve)
+        resolve = default_resolve;
+
+    std::vector<ThreadRun> runs;
+    const ThreadRun* prev = nullptr;
+    for (const auto& e : events) {
+        if (e.comparator != watch_comp)
+            continue;
+        if (!runs.empty())
+            runs.back().end_src = e.src_index; // close the previous run here
+        ThreadRun r;
+        r.begin_src = e.src_index;
+        r.end_src = e.src_index; // left open until the next switch
+        r.tcb = e.value;
+        r.id = resolve(e.value);
+        runs.push_back(r);
+        (void)prev;
+    }
+    if (!runs.empty() && stream_end_src > runs.back().begin_src)
+        runs.back().end_src = stream_end_src;
+    return runs;
+}
+
+std::vector<SliceEvent> thread_runs_to_slices(
+    const std::vector<ThreadRun>& runs, int track, std::map<int, std::string>& track_names)
+{
+    std::vector<SliceEvent> slices;
+    track_names[track] = "Threads";
+    uint64_t tick = 0;
+    for (const auto& r : runs) {
+        // skip zero-length (still-open final) runs so Perfetto gets a closed slice
+        if (r.end_src <= r.begin_src)
+            continue;
+        SliceEvent b;
+        b.tick = tick++;
+        b.byte_index = r.begin_src;
+        b.begin = true;
+        b.name = r.id.name;
+        b.track = track;
+        slices.push_back(b);
+
+        SliceEvent e;
+        e.tick = tick++;
+        e.byte_index = r.end_src;
+        e.begin = false;
+        e.name = r.id.name;
+        e.track = track;
+        slices.push_back(e);
+    }
+    return slices;
 }
 
 } // namespace cortrace

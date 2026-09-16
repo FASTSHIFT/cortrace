@@ -92,3 +92,67 @@ TEST(nxtrace_maps_source_index)
     CHECK_EQ((long)ev.size(), 1L);
     CHECK_EQ((long)ev[0].src_index, 100L);
 }
+
+TEST(nxtrace_build_thread_runs_intervals)
+{
+    // three switches at src 10, 20, 35 to TCBs A, B, A; stream ends at 50.
+    std::vector<DwtEvent> ev;
+    auto mk = [](std::size_t src, uint32_t v) {
+        DwtEvent e;
+        e.src_index = src;
+        e.comparator = 0;
+        e.size = 4;
+        e.value = v;
+        return e;
+    };
+    ev.push_back(mk(10, 0x20000100));
+    ev.push_back(mk(20, 0x20000200));
+    ev.push_back(mk(35, 0x20000100));
+
+    auto runs = build_thread_runs(ev, nullptr, 0, /*stream_end_src=*/50);
+    CHECK_EQ((long)runs.size(), 3L);
+    // run 0: [10,20) TCB A ; run 1: [20,35) TCB B ; run 2: [35,50) TCB A
+    CHECK_EQ((long)runs[0].begin_src, 10L);
+    CHECK_EQ((long)runs[0].end_src, 20L);
+    CHECK_EQ((long)runs[1].begin_src, 20L);
+    CHECK_EQ((long)runs[1].end_src, 35L);
+    CHECK_EQ((long)runs[2].begin_src, 35L);
+    CHECK_EQ((long)runs[2].end_src, 50L);
+    // same TCB -> same tid/name
+    CHECK_EQ(runs[0].id.tid, runs[2].id.tid);
+    CHECK(runs[0].id.tid != runs[1].id.tid);
+}
+
+TEST(nxtrace_runs_to_slices_balanced)
+{
+    std::vector<DwtEvent> ev;
+    auto mk = [](std::size_t src, uint32_t v) {
+        DwtEvent e;
+        e.src_index = src;
+        e.comparator = 0;
+        e.size = 4;
+        e.value = v;
+        return e;
+    };
+    ev.push_back(mk(10, 0x20000100));
+    ev.push_back(mk(20, 0x20000200));
+    auto runs = build_thread_runs(ev, nullptr, 0, 30);
+
+    std::map<int, std::string> tracks;
+    auto sl = thread_runs_to_slices(runs, 7, tracks);
+    CHECK_EQ((long)sl.size(), 4L); // 2 runs * (begin+end)
+    CHECK(tracks.count(7) == 1);
+    // balanced begins/ends, all on track 7, byte_index matches run bounds
+    long begins = 0, ends = 0;
+    for (const auto& s : sl) {
+        CHECK_EQ(s.track, 7);
+        if (s.begin)
+            ++begins;
+        else
+            ++ends;
+    }
+    CHECK_EQ(begins, 2L);
+    CHECK_EQ(ends, 2L);
+    CHECK_EQ((long)sl[0].byte_index, 10L);
+    CHECK_EQ((long)sl[1].byte_index, 20L);
+}

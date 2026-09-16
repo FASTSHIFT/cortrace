@@ -25,8 +25,12 @@
 #ifndef CORTRACE_NXTRACE_HPP
 #define CORTRACE_NXTRACE_HPP
 
+#include "cortrace/callstack.hpp"
+
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <string>
 #include <vector>
 
 namespace cortrace {
@@ -46,6 +50,39 @@ struct DwtEvent {
 // `src_index` is empty, events carry a byte offset into `bytes` instead.
 std::vector<DwtEvent> parse_dwt_data_values(
     const std::vector<uint8_t>& bytes, const std::vector<std::size_t>& src_index);
+
+// Resolve a captured value (the written "current task" pointer) to a thread
+// identity. On NuttX this reads the TCB (pid, entry->symbol) from the ELF image
+// (doc §4); the default implementation just formats the pointer, so the
+// scheduling view works even without target memory.
+struct ThreadId {
+    int tid = 0; // stable small id (Perfetto track key)
+    std::string name; // display name
+};
+
+// A thread-run interval: the running thread from one switch to the next.
+struct ThreadRun {
+    std::size_t begin_src = 0; // src_index of the switch that started this run
+    std::size_t end_src = 0; // src_index of the next switch (or last event)
+    uint32_t tcb = 0; // captured "current task" pointer
+    ThreadId id;
+};
+
+// Turn a sequence of DWT switch events (each carrying the new current-task
+// pointer) into thread-run intervals. `resolve` maps a captured pointer to a
+// ThreadId; if null, a default pointer-formatting resolver is used. Only events
+// on comparator `watch_comp` are treated as switches (default 0). The last run
+// is left open (end_src == begin_src) unless `stream_end_src` is given.
+std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
+    ThreadId (*resolve)(uint32_t value) = nullptr, uint8_t watch_comp = 0,
+    std::size_t stream_end_src = 0);
+
+// Emit thread-run intervals as Perfetto slice events on a single "Threads"
+// track (track id `track`), one slice per run named by the resolved thread.
+// byte_index is set to the run's begin_src so the shared FPGA time base applies.
+// Also fills `track_names` for the multi-track writer.
+std::vector<SliceEvent> thread_runs_to_slices(
+    const std::vector<ThreadRun>& runs, int track, std::map<int, std::string>& track_names);
 
 } // namespace cortrace
 
