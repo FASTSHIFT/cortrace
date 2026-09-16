@@ -97,6 +97,44 @@ namespace {
         }
         return cur;
     }
+
+    // Multi-stream variant of get_packet: interpret one 16-byte TPIU frame,
+    // appending every data byte to its stream's buffer in `streams` and the
+    // byte's source index (from `rxed_src`) to the parallel `src` buffer.
+    // Returns the updated current stream.
+    int get_packet_multi(const uint8_t* rxed, const std::size_t* rxed_src, int cur_stream,
+        std::map<int, std::vector<uint8_t>>& streams, std::map<int, std::vector<std::size_t>>& src)
+    {
+        int delayed = NO_CHANGE;
+        uint8_t lowbits = rxed[TPIU_PACKET_LEN - 1];
+        int cur = cur_stream;
+        for (int i = 0; i < TPIU_PACKET_LEN; i += 2) {
+            if (rxed[i] & 1) {
+                // stream change, before or after this data byte
+                if (lowbits & 1)
+                    delayed = rxed[i] >> 1;
+                else
+                    cur = rxed[i] >> 1;
+            } else {
+                if (cur) { // stream 0 = padding, dropped
+                    const uint8_t b = static_cast<uint8_t>(rxed[i] | (lowbits & 1));
+                    streams[cur].push_back(b);
+                    src[cur].push_back(rxed_src[i]);
+                }
+            }
+            // second byte of the pair is always data (for i < 14)
+            if (i < 14 && cur) {
+                streams[cur].push_back(rxed[i + 1]);
+                src[cur].push_back(rxed_src[i + 1]);
+            }
+            if (delayed != NO_CHANGE) {
+                cur = delayed;
+                delayed = NO_CHANGE;
+            }
+            lowbits >>= 1;
+        }
+        return cur;
+    }
 } // namespace
 
 DeframeResult tpiu_deframe(
@@ -164,6 +202,96 @@ DeframeResult deframe_raw_capture(
             DeframeResult r = tpiu_deframe(data, want_stream, p);
             const bool better = !have_best || r.async_count > best.async_count
                 || (r.async_count == best.async_count && r.etm.size() > best.etm.size());
+            if (better) {
+                best = std::move(r);
+                have_best = true;
+            }
+        }
+    }
+    return best;
+}
+
+MultiDeframeResult tpiu_deframe_multi(const std::vector<uint8_t>& data, const DeframePhase& phase)
+{
+    MultiDeframeResult r;
+    r.phase = phase;
+
+    bool state_synced = false;
+    uint32_t sync_monitor = 0;
+    uint8_t rxed[TPIU_PACKET_LEN] = { 0 };
+    std::size_t rxed_src[TPIU_PACKET_LEN] = { 0 };
+    int byte_count = 0;
+    bool got_lowbits = false;
+    int cur_stream = 0;
+
+    for (std::size_t pos = 0; pos < data.size(); ++pos) {
+        const uint8_t d = data[pos];
+        sync_monitor = (sync_monitor << 8) | d;
+        if (sync_monitor == SYNCPATTERN) {
+            state_synced = true;
+            byte_count = 0;
+            got_lowbits = false;
+            ++r.syncs;
+            continue;
+        }
+        if (!state_synced)
+            continue;
+        if (!got_lowbits) {
+            got_lowbits = true;
+            rxed[byte_count] = d;
+            rxed_src[byte_count] = pos;
+            continue;
+        }
+        got_lowbits = false;
+        if (d == HALFSYNC_HIGH && rxed[byte_count] == HALFSYNC_LOW)
+            continue; // halfsync filler, ignore
+        ++byte_count;
+        rxed[byte_count] = d;
+        rxed_src[byte_count] = pos;
+        ++byte_count;
+        if (byte_count == TPIU_PACKET_LEN) {
+            ++r.frames;
+            byte_count = 0;
+            cur_stream = get_packet_multi(rxed, rxed_src, cur_stream, r.streams, r.src_index);
+        }
+    }
+    // Alignment score: A-syncs in the ETM stream (id 2), if present.
+    auto it = r.streams.find(2);
+    if (it != r.streams.end())
+        r.async_count = count_etmv4_async(it->second.data(), it->second.size());
+    return r;
+}
+
+MultiDeframeResult deframe_raw_capture_multi(
+    const uint8_t* raw, std::size_t len, bool search, const DeframePhase& phase)
+{
+    if (!search) {
+        auto data = assemble_nibbles(raw, len, phase);
+        return tpiu_deframe_multi(data, phase);
+    }
+
+    // Try all four phases; keep the one whose ETM stream (id 2) has the most
+    // A-syncs -- the ETM stream is the alignment anchor; the other streams ride
+    // the same frames/phase.
+    MultiDeframeResult best;
+    bool have_best = false;
+    for (int parity = 0; parity < 2; ++parity) {
+        for (int order = 0; order < 2; ++order) {
+            DeframePhase p { parity, order };
+            auto data = assemble_nibbles(raw, len, p);
+            MultiDeframeResult r = tpiu_deframe_multi(data, p);
+            std::size_t etm_sz = 0;
+            auto it = r.streams.find(2);
+            if (it != r.streams.end())
+                etm_sz = it->second.size();
+            std::size_t best_etm_sz = 0;
+            if (have_best) {
+                auto bit = best.streams.find(2);
+                if (bit != best.streams.end())
+                    best_etm_sz = bit->second.size();
+            }
+            const bool better = !have_best || r.async_count > best.async_count
+                || (r.async_count == best.async_count && etm_sz > best_etm_sz);
             if (better) {
                 best = std::move(r);
                 have_best = true;

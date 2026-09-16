@@ -19,7 +19,9 @@
 #ifndef CORTRACE_DEFRAME_HPP
 #define CORTRACE_DEFRAME_HPP
 
+#include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 namespace cortrace {
@@ -38,6 +40,33 @@ struct DeframeResult {
     std::size_t frames = 0; // TPIU 16-byte frames decoded
     std::size_t syncs = 0; // full TPIU sync patterns seen
 };
+
+// Multi-stream deframe: demux ALL TPIU ATB streams in a single pass so ETM
+// (stream 2) and DWT/ITM (stream 1) share one timebase. Each output byte keeps
+// the source index (into the ASSEMBLED byte stream) it came from, so callers
+// can map any stream's byte back to the same FPGA time base array.
+struct MultiDeframeResult {
+    // stream_id -> deframed bytes for that ATB stream (stream 0 = padding,
+    // dropped). Typical ids here: 2 = ETM, 1 = ITM/DWT.
+    std::map<int, std::vector<uint8_t>> streams;
+    // stream_id -> per-byte source index into the assembled stream (parallel to
+    // streams[id]); used to index a shared timebase.
+    std::map<int, std::vector<std::size_t>> src_index;
+    DeframePhase phase;
+    int async_count = 0; // ETMv4 A-syncs in stream 2 (alignment score)
+    std::size_t frames = 0;
+    std::size_t syncs = 0;
+};
+
+// Deframe an assembled byte stream, demuxing every ATB stream at once.
+MultiDeframeResult tpiu_deframe_multi(const std::vector<uint8_t>& data, const DeframePhase& phase);
+
+// Full front end (multi-stream): nibble-assemble + demux all streams. When
+// `search` is true, try all four phases and keep the one whose stream 2 has the
+// most ETMv4 A-syncs (the ETM stream is the alignment anchor for the whole
+// capture; the other streams ride the same frames/phase).
+MultiDeframeResult deframe_raw_capture_multi(
+    const uint8_t* raw, std::size_t len, bool search, const DeframePhase& phase);
 
 // Assemble bytes from a raw capture under a fixed phase (no search).
 std::vector<uint8_t> assemble_nibbles(

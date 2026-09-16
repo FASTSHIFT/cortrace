@@ -147,3 +147,50 @@ TEST(deframe_locked_phase_skips_search)
     CHECK_EQ(r.phase.parity, 1);
     CHECK_EQ(r.phase.order, 0);
 }
+
+// Build a frame that carries two streams: switch to `s0` for the first half,
+// then to `s1` mid-frame. Even byte with LSB=1 is a stream id (id in bits[7:1]);
+// aux LSB byte kept 0 so no data-LSB or delayed-switch quirk. This mirrors how
+// the CoreSight formatter interleaves ETM(2) and ITM/DWT(1).
+TEST(deframe_multi_demuxes_all_streams)
+{
+    // Frame: [id s0][d a][d b][d c] ... [id s1][d x][d y] ...
+    std::vector<uint8_t> f(16, 0);
+    f[0] = static_cast<uint8_t>((2 << 1) | 1); // select stream 2
+    f[1] = 0x10; // data -> s2
+    f[2] = 0x12; // data -> s2 (even, LSB 0)
+    f[3] = 0x14; // data -> s2
+    f[4] = static_cast<uint8_t>((1 << 1) | 1); // select stream 1
+    f[5] = 0xA0; // data -> s1
+    f[6] = 0xA2; // data -> s1
+    f[7] = 0xA4; // data -> s1
+    // remaining even slots (8,10,12) are data 0x00 on stream 1; keep as 0.
+    auto wire = with_sync(f);
+
+    DeframePhase ph { 0, 0 };
+    MultiDeframeResult r = tpiu_deframe_multi(wire, ph);
+    CHECK_EQ((long)r.syncs, 1L);
+    CHECK_EQ((long)r.frames, 1L);
+
+    // stream 2 must contain the 0x10/0x12/0x14 bytes; stream 1 the 0xA0.. ones.
+    CHECK(r.streams.count(2) == 1);
+    CHECK(r.streams.count(1) == 1);
+    const auto& s2 = r.streams[2];
+    const auto& s1 = r.streams[1];
+    CHECK(s2.size() >= 3);
+    CHECK_EQ((int)s2[0], 0x10);
+    CHECK_EQ((int)s2[1], 0x12);
+    CHECK_EQ((int)s2[2], 0x14);
+    CHECK(s1.size() >= 3);
+    CHECK_EQ((int)s1[0], 0xA0);
+    CHECK_EQ((int)s1[1], 0xA2);
+    CHECK_EQ((int)s1[2], 0xA4);
+
+    // src_index is parallel to each stream and strictly increasing (bytes come
+    // out in wire order), and points past the 4-byte sync.
+    CHECK_EQ((long)r.src_index[2].size(), (long)s2.size());
+    CHECK_EQ((long)r.src_index[1].size(), (long)s1.size());
+    for (std::size_t i = 1; i < r.src_index[2].size(); ++i)
+        CHECK(r.src_index[2][i] > r.src_index[2][i - 1]);
+    CHECK(r.src_index[2][0] >= 4); // after the sync word
+}
