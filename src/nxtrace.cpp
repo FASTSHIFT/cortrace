@@ -272,13 +272,26 @@ std::vector<SliceEvent> reattribute_slices_to_threads(const std::vector<SliceEve
         return tit == tid_to_track.end() ? fallback : tit->second;
     };
 
+    const uint64_t first_begin = runs.empty() ? 0 : runs.front().begin_src;
+
     std::vector<SliceEvent> out = etm_slices;
     for (auto& s : out) {
         // Only re-attribute the main-thread call stack (track 0). Leave ISR
         // tracks (>0, allocated by the call-stack machine) untouched so IRQs
         // keep their own lanes.
-        if (s.track == 0)
-            s.track = track_for_byte(s.byte_index, 0);
+        if (s.track != 0)
+            continue;
+        const int trk = track_for_byte(s.byte_index, 0);
+        // A slice that STAYS on track 0 but sits at/after the first switch is a
+        // boot-context frame the call-stack machine only closed at end-of-trace
+        // (its END byte_index is far in the future), which Perfetto would render
+        // as one slice stretching across the whole timeline -- a bogus long
+        // "main thread" bar. Clamp such stragglers to the first switch so the
+        // boot lane closes cleanly where thread scheduling takes over. Slices
+        // that attribute to a real thread are moved normally.
+        if (trk == 0 && !runs.empty() && s.byte_index > first_begin)
+            s.byte_index = first_begin;
+        s.track = trk;
     }
     return out;
 }
