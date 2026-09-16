@@ -25,6 +25,8 @@ enum class ElementKind {
     CycleCount, // standalone cycle-count (cycles since last counted point)
     NoSync, // decoder lost sync / resync point (overflow or bad-stream symptom)
     Overflow, // explicit trace overflow (ETM/ETF dropped data)
+    Benign, // modeled-but-inert element (PE_CONTEXT, SYNC_MARKER, EO_TRACE, ...):
+            // counted for transparency but NOT a loss symptom
     OtherUnknown, // any other OpenCSD element we don't model (counted, not silent)
 };
 

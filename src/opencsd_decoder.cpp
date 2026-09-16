@@ -263,8 +263,15 @@ namespace {
                 emit(Element::simple(ElementKind::NoSync, bidx));
                 break;
             case OCSD_GEN_TRC_ELEM_EO_TRACE:
-                // End-of-trace marker; benign, but count it rather than drop.
-                emit(Element::simple(ElementKind::OtherUnknown, bidx));
+            case OCSD_GEN_TRC_ELEM_PE_CONTEXT:
+            case OCSD_GEN_TRC_ELEM_SYNC_MARKER:
+            case OCSD_GEN_TRC_ELEM_EVENT:
+                // Modeled-but-inert elements: end-of-buffer marker, PE context
+                // updates (emitted on every context/thread change), sync markers
+                // and numbered events. These are NORMAL stream content, not a
+                // loss symptom -- count them as Benign so stream-health can tell
+                // "healthy but unmodeled" apart from "actually lost data".
+                emit(Element::simple(ElementKind::Benign, bidx));
                 break;
             default:
                 // Any element type we don't model is still counted (never

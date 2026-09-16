@@ -98,12 +98,23 @@ struct Coverage {
             blind_pending = true;
             break;
         case ElementKind::NoSync:
-            nosync_count++; // decoder lost sync = overflow / corrupt-stream symptom
+            // NO_SYNC means "waiting for sync": either the ONE normal startup
+            // sync before the first instruction, or a mid-stream resync AFTER an
+            // ETM/ETF overflow. Only the latter is data loss, so split them:
+            // the initial run of NO_SYNC (before any InstrRange) is startup;
+            // anything after we've decoded instructions is a real loss.
+            if (visited.empty())
+                startup_sync_count++;
+            else
+                nosync_count++;
             blind_pending = true;
             break;
         case ElementKind::Overflow:
             overflow_count++;
             blind_pending = true;
+            break;
+        case ElementKind::Benign:
+            benign_count++; // PE_CONTEXT / SYNC_MARKER / EO_TRACE: normal, not loss
             break;
         case ElementKind::OtherUnknown:
             other_count++;
@@ -128,10 +139,12 @@ struct Coverage {
     long ts_count = 0;
     // Stream-health counters (never silently dropped): NO_SYNC is the overflow/
     // corrupt-stream symptom; TraceOn is a resync; AddrNacc a decode blind spot.
-    long nosync_count = 0;
+    long nosync_count = 0; // mid-stream resync = real overflow/loss
+    long startup_sync_count = 0; // initial sync before first instruction (normal)
     long overflow_count = 0;
     long traceon_count = 0;
     long nacc_count = 0;
+    long benign_count = 0; // modeled-but-inert (PE_CONTEXT/SYNC_MARKER/EO_TRACE)
     long other_count = 0;
     bool have_first_ts = false;
     uint64_t first_ts = 0, last_ts = 0;
@@ -603,8 +616,9 @@ int main(int argc, char** argv)
     const bool lossy = cov.nosync_count > 0 || cov.overflow_count > 0 || m.dropped_calls > 0;
     std::fprintf(stderr,
         "  stream health       : lost-sync=%ld overflow=%ld resync(TraceOn)=%ld "
-        "addr-nacc=%ld other=%ld  -> %s\n",
-        cov.nosync_count, cov.overflow_count, cov.traceon_count, cov.nacc_count, cov.other_count,
+        "addr-nacc=%ld startup-sync=%ld benign=%ld other=%ld  -> %s\n",
+        cov.nosync_count, cov.overflow_count, cov.traceon_count, cov.nacc_count,
+        cov.startup_sync_count, cov.benign_count, cov.other_count,
         lossy ? "LOSSY (trace dropped data -- see gotchas: raise TRACECLK/widen port/lower CPU)"
               : "clean");
 
