@@ -1,7 +1,7 @@
 # Cortrace — Perfetto 一键实时可视化桥
 
 日期：2026-09-16
-状态：设计稿（未实现）
+状态：P0 已实现并上板实测（`scripts/perfetto_open.py`）；P1-P4 设计稿
 
 把当前"抓包 → 解码成 `.perfetto` 文件 → 手动拖进 ui.perfetto.dev"的三步手工流程，
 收敛成**一条命令 / 一次点击**：触发采集 → 解码 → 浏览器里自动打开 Perfetto 时间线，
@@ -38,46 +38,64 @@ flowchart LR
 Perfetto UI 是**纯前端**应用（无自有后端），但官方提供了三条与本地程序对接的通道。
 逐条评估：
 
-### 2.1 Direct URL —— `#!/?url=`（本地 HTTP + CORS）
+### 2.1 Direct URL —— `#!/?url=`（本地 HTTP + CORS）——❌ loopback 上被 Chrome 否决
 
 UI 支持 `https://ui.perfetto.dev/#!/?url=<TRACE_URL>`：页面加载后**自己 `fetch()`**
-那个 URL 把 trace 拉进浏览器内存渲染。URL 可以指向本机的一个临时 HTTP server。
+那个 URL 把 trace 拉进浏览器内存渲染。看似可指向本机临时 HTTP server，**但实测在现代
+Chrome 的 loopback 场景不可行**（见下）。
 
-要求（官方文档）：
-- trace 必须能被一个**无查询参数的 GET** 取到；
-- server 必须回 CORS 头 `Access-Control-Allow-Origin`（`*` 或 `https://ui.perfetto.dev`）；
-- UI 站点是 HTTPS，但它 `fetch` 的目标允许是 `http://127.0.0.1:<port>`（浏览器对
-  localhost 的混合内容有豁免）。
+官方要求写得很明确：**trace URL 必须是 HTTPS**（`Option 1: Direct URL for public
+traces`）。指向 `http://127.0.0.1` 违反这一前提。
 
 ```mermaid
 sequenceDiagram
-    participant CLI as cortrace live (本地)
-    participant BR as 浏览器
+    participant CLI as 本地 server
+    participant BR as Chrome
     participant UI as ui.perfetto.dev
-    CLI->>CLI: 解码得到 trace bytes，起临时 HTTP server(127.0.0.1:PORT)<br>带 CORS 头
     CLI->>BR: xdg-open "ui.perfetto.dev/#!/?url=http://127.0.0.1:PORT/t.perfetto"
     BR->>UI: 加载 UI (HTTPS)
-    UI->>CLI: GET /t.perfetto  (CORS 预检 + 取数)
-    CLI-->>UI: 200 + trace bytes + ACAO 头
-    UI->>UI: 渲染时间线
-    CLI->>CLI: 收到该 GET 后即可退出 server
+    UI->>BR: fetch("http://127.0.0.1:PORT/..")
+    Note over BR: Private Network Access 拦截<br>(HTTPS 页 -> 私有地址)<br>请求在客户端被掐，未离开浏览器
+    BR-->>UI: TypeError: Failed to fetch
+    Note over CLI: server 日志为空——请求根本没到
 ```
 
-- ✅ **最简**：一个 ~30 行的临时 HTTP server + `xdg-open`，无浏览器扩展、无 HTML 页面。
-- ✅ **无手工拷贝**、可脚本化、可在 CI 里跑。
-- ⚠️ 受浏览器 2GB 内存上限约束（WASM 解析）；大 trace 要配 2.3。
-- ⚠️ 需正确的 CORS 头（易错点，见 §6）。
+**实测否决（上板，Chrome 141）**：UI 报 `Could not fetch the trace ... TypeError:
+Failed to fetch`，而本地 server 日志**完全为空**——请求在浏览器客户端就被拦，从未发出。
 
-### 2.2 postMessage —— `window.open` + `PING/PONG` + 传 ArrayBuffer
+根因 = **Private Network Access（PNA，Chrome v130+）**：HTTPS 页面（`ui.perfetto.dev`）
+向**私有地址**（`127.0.0.1`）发起的子请求，会在预检阶段被浏览器**客户端侧**阻断，且
+**先于任何请求离开浏览器**。关键佐证：
 
-宿主页面 `window.open('https://ui.perfetto.dev')` 拿到 handle，反复 `postMessage('PING')`
-直到 UI 回 `'PONG'`，然后 post `{perfetto:{buffer, title, fileName}}` 把 trace 的
-**ArrayBuffer 直接塞进去**。数据只在浏览器内存，不经任何 server。
+- `curl` 能取到（curl 不做 PNA），但浏览器取不到 —— 证明不是 server/CORS 问题。
+- 补齐 `Access-Control-Allow-Private-Network: true` 头**也无效** —— 阻断在客户端，响应头
+  根本没机会被读到。
+- 用 `--disable-features=PrivateNetworkAccessChecks,BlockInsecurePrivateNetworkRequests`
+  启动 Chrome 后**立即成功**（server 收到 GET 200）—— 反证根因就是 PNA。
+
+结论：**`#!/?url=` 指向 loopback HTTP 这条路在现代 Chrome 上死路**，且不能要求用户改
+浏览器 flag。改用 §2.2 postMessage。
+
+### 2.2 postMessage —— 本地宿主页 + `window.open` + `PING/PONG` ✅（选定，已实测）
+
+本地 HTTP server 托管一个**宿主页面**（host page），并在**同一 origin**上托管 trace 文件。
+宿主页 JS 做三件事：① 从**自己的 origin**（同源）`fetch()` trace 字节 —— **同源请求，
+不触发 PNA/CORS**；② `window.open('https://ui.perfetto.dev')`；③ 反复 `postMessage('PING')`
+直到 UI 回 `'PONG'`，再 post `{perfetto:{buffer, title}}` 把 **ArrayBuffer 直接塞进 UI**。
+
+**为什么这样能绕开 §2.1 的 PNA 死路**：trace 字节是宿主页从**同源** loopback 取的
+（同源不算 private-network 跨界），而送进 UI 走的是 **postMessage 内存通道**，不是网络
+fetch —— **全程没有"HTTPS 页 → 私有地址"的跨域网络请求**，PNA 无从触发。
 
 ```mermaid
 sequenceDiagram
-    participant H as 宿主页面 (本地 HTML)
+    participant CLI as 本地 server (127.0.0.1)
+    participant H as 宿主页 (127.0.0.1，同源)
     participant UI as ui.perfetto.dev (新标签页)
+    CLI->>H: xdg-open 宿主页 http://127.0.0.1:PORT/
+    H->>CLI: fetch 同源 /trace  (无 PNA/CORS)
+    CLI-->>H: 200 + trace bytes
+    H->>CLI: GET /__delivered (beacon：字节已进浏览器)
     H->>UI: window.open()
     loop 直到 PONG
         H->>UI: postMessage("PING")
@@ -87,12 +105,18 @@ sequenceDiagram
     UI->>UI: 渲染时间线
 ```
 
-- ✅ 不需要 HTTP server / CORS；能设置标题、文件名。
-- ✅ 支持 auth / 自定义分享 URL（我们用不上）。
-- ⚠️ 需要一个**本地 HTML 宿主页**跑 JS，且不能从 `file://` 打开（浏览器安全限制），
-  仍要一个 localhost HTTP server 托管那个 HTML —— 复杂度反而比 2.1 高。
-- ⚠️ 弹窗拦截：`window.open` 必须由用户手势触发且 fetch 不能太久。
-- 适合"网页仪表盘"式集成，对我们的 CLI 场景偏重。
+- ✅ **绕开 PNA**（同源 fetch + postMessage 内存通道），是 loopback 场景唯一稳的路。
+- ✅ 数据只在浏览器内存 + 本地 server，不经任何外部服务；可设标题。
+- ✅ 可脚本化：server 收到 `/__delivered` beacon 即知"字节已进浏览器"，可退出或 `--keep`。
+- ⚠️ 弹窗拦截：`window.open` 非用户手势触发时 Chrome 会拦，宿主页需**降级为一个按钮**
+  让用户点一下（已实现）。
+- ⚠️ 宿主页不能从 `file://` 开（浏览器安全限制），故必须由本地 HTTP server 托管 —— 本就
+  需要 server，无额外成本。
+
+**已实测（上板，Chrome 141）**：`scripts/perfetto_open.py` 起宿主页 → 同源 fetch 8.4MB
+trace → postMessage 送入 UI → 时间线正常渲染（含 `--nx-tcbmap` 补的线程名泳道）。server
+日志完整可见 `GET / 200`、`GET /trace 200`、`GET /__delivered 204`，证明请求全部到达且成功
+（与 §2.1 的空日志形成对照）。
 
 ### 2.3 TraceProcessor 原生加速 server —— `trace_processor server http`
 
@@ -111,21 +135,23 @@ flowchart LR
   解析后膨胀 2-4x 会撞墙）。
 - ✅ 复用同一份 trace 免重复解析（`export perfetto` 归档）。
 - ⚠️ 需额外下载 `trace_processor` 二进制；UI 里多一步"用加速器？"确认弹窗。
-- 与 2.1/2.2 **正交**：可叠加——URL 打开 UI，同时后台挂 TP server 供大 trace 用。
+- 与 2.2 **正交**：可叠加——postMessage 打开 UI，同时后台挂 TP server 供大 trace 用。
 
 ### 2.4 结论：分层方案
 
-| 方案 | 复杂度 | 无需拷贝 | 大 trace | 依赖 |
-|------|:------:|:-------:|:--------:|------|
-| 2.1 Direct URL + 本地 CORS server | 低 | ✅ | ❌(2GB) | 无（stdlib http） |
-| 2.2 postMessage | 中 | ✅ | ❌(2GB) | 本地 HTML 宿主页 |
-| 2.3 TraceProcessor server | 中 | ✅ | ✅ | `trace_processor` 二进制 |
+| 方案 | 复杂度 | 无需拷贝 | loopback 可用 | 大 trace | 依赖 |
+|------|:------:|:-------:|:------------:|:--------:|------|
+| 2.1 Direct URL `#!/?url=` | 低 | ✅ | ❌ **被 Chrome PNA 否决** | ❌(2GB) | 无 |
+| 2.2 postMessage + 宿主页 | 中 | ✅ | ✅ **实测通过** | ❌(2GB) | stdlib http |
+| 2.3 TraceProcessor server | 中 | ✅ | ✅ | ✅ | `trace_processor` 二进制 |
 
-**选型**：
-- **主线 = 2.1 Direct URL**：覆盖 95% 日常迭代（trace 通常几十~几百 MB），最简、可脚本、
-  零额外依赖。
-- **大 trace 档 = 2.3**：`--big` 开关切到 TraceProcessor server 路径。
-- **不采用 2.2**：对 CLI 场景它比 2.1 更重（要托管 HTML），收益（auth/分享）我们用不到。
+**选型（修订）**：
+- **主线 = 2.2 postMessage**：唯一在现代 Chrome loopback 场景稳定可用的路（2.1 被 PNA
+  掐死，实测确认）。同源 fetch + postMessage 内存通道，零浏览器改动，可脚本化，仅依赖
+  Python stdlib http。覆盖日常迭代（trace 几十~几百 MB）。
+- **大 trace 档 = 2.3**：`--big` 开关切到 TraceProcessor server 路径（突破 2GB）。
+- **弃用 2.1**：`#!/?url=` 要求 HTTPS trace URL，指向 loopback HTTP 触发 PNA 客户端阻断，
+  无法在不改浏览器 flag 的前提下工作。
 
 ---
 
@@ -154,11 +180,11 @@ flowchart TD
 1. **流式免落盘**：`stream_grab | cortrace-decode --perf -`（decode 支持 `-` 写 stdout），
    trace bytes 直接进编排器内存的 buffer，`perftrace/` 落盘变成可选（`--save`）。
    → 需要 cortrace-decode 支持 `--perf -`（见 §5 改动点）。
-2. **CORS server 用 stdlib**：Python `http.server` + 覆写 `end_headers` 加 ACAO，
-   只服务一个内存 buffer，收到首个成功 GET 即可关闭（或 `--keep` 常驻供刷新）。
-3. **startupCommands 预置视图**：URL 里带 `startupCommands`（URL-encoded JSON）自动
-   pin 线程轨、跑一条概览 query，省去每次手动操作。例如 pin `Threads` track、
-   按名 pin worker 轨。
+2. **本地宿主页用 stdlib**（`scripts/perfetto_open.py`，已实现）：Python `http.server`
+   同源托管宿主页 HTML + trace + `/__delivered` beacon，宿主页同源 fetch trace 再
+   postMessage 送入 UI；收到 beacon 即知"字节已进浏览器"，可退出或 `--keep` 常驻供刷新。
+3. **startupCommands 预置视图**：postMessage 打开 UI 时（或 `window.open` 的 URL 上）带
+   `startupCommands`（URL-encoded JSON）自动 pin 线程轨、跑一条概览 query，省去手动操作。
 4. **参数透传**：`--cycle-time/--sysclk-hz/--trace-width/--nx-*` 等 decode 参数原样透传，
    一处配置多处复用。
 
@@ -183,7 +209,7 @@ cortrace-live [capture opts] [decode opts] [ui opts]
 
   # 可视化
   --open / --no-open          是否自动开浏览器（默认 open）
-  --port 0                    CORS server 端口（0=随机空闲）
+  --port 0                    宿主页 server 端口（0=随机空闲）
   --big                       改走 trace_processor server（大 trace）
   --pin-threads               注入 startupCommands 预置 Threads 轨视图
   --save PATH                 额外落盘一份 .perfetto（默认不落盘）
@@ -207,30 +233,36 @@ cortrace-live [capture opts] [decode opts] [ui opts]
 
 ## 5. 对现有代码的改动点
 
-| 组件 | 改动 | 理由 |
+| 组件 | 改动 | 状态 |
 |------|------|------|
-| `cortrace/tools/cortrace_decode.cpp` | `--perf -` 写 stdout（或 `--perf-fd N`） | 免落盘管道，编排器直接拿 bytes |
-| `cortrace-fpga/host/scripts/cortrace-live` | **新增**编排器 | 串采集/解码/浏览器 |
-| `cortrace-fpga/host/scripts/stream_grab.c` | 支持 `-`（stdout）输出（可能已支持文件，补 stdout） | 管道化 |
+| `cortrace/scripts/perfetto_open.py` | 宿主页 + postMessage 打开器（P0） | ✅ 已实现 |
+| `cortrace/tools/cortrace_decode.cpp` | `--perf -` 写 stdout（或 `--perf-fd N`） | 待做（P1，免落盘管道） |
+| `cortrace-fpga/host/scripts/cortrace-live` | **新增**编排器 | 待做（P2，串采集/解码/浏览器） |
+| `cortrace-fpga/host/scripts/stream_grab.c` | 支持 `-`（stdout）输出 | 待做（P1，管道化） |
 | `nxtrace_dap.cfg` | 无需改 | `--arm` 复用现有 proc |
 
-`--perf -` 是唯一的 cortrace 核心改动，其余都在 host 脚本层，风险低。
+P0 的 `perfetto_open.py` 已落地且不碰 C++ 核心；后续 `--perf -` 是唯一的 cortrace 核心
+改动，其余都在 host 脚本层，风险低。
 
 ---
 
 ## 6. 易错点（实现时必看）
 
-- **CORS 头必须齐**：除 `Access-Control-Allow-Origin`，OPTIONS 预检还要
-  `Access-Control-Allow-Methods: GET` 和 `Access-Control-Allow-Headers`。少一个 UI 静默拉不到。
-- **URL 无查询参数**：UI 要求 trace URL 是「无 query 的 GET」，路径里别带 `?`。
-- **不能 `file://`**：postMessage 方案（若将来做）的宿主 HTML 必须经 HTTP server，
-  `file://` 会被浏览器安全策略拒。
+- **不要用 `#!/?url=` 指向 loopback**（§2.1）：现代 Chrome 的 Private Network Access 会在
+  客户端阻断 HTTPS 页对私有地址的 fetch，请求根本不发出，`curl` 能过是假象。用 §2.2
+  postMessage。
+- **宿主页与 trace 必须同源**：postMessage 方案能绕开 PNA 的**前提**是宿主页从**自己的
+  origin** fetch trace（同源不算 private-network 跨界）。别让宿主页去 fetch 别的 origin。
+- **宿主页不能 `file://`**：浏览器安全策略拒 `file://` 的 window.open/postMessage，必须由
+  本地 HTTP server 托管宿主页（本就需要）。
+- **弹窗拦截**：`window.open` 非用户手势触发时会被拦，宿主页需降级成一个按钮让用户点一下
+  （`perfetto_open.py` 已实现该降级）。
+- **`Cross-Origin-Opener-Policy`**：宿主页**不能**带 `COOP: same-origin`，否则拿不到
+  `window.open` 的 handle，postMessage 失效。
 - **端口固定值冲突**：TraceProcessor 探测写死 `9001`；`--big` 模式端口不可改（UI 只探
   9001，多实例要 `Relax CSP` flag + `?rpc_port=`）。
-- **弹窗拦截**（仅 postMessage）：`window.open` 要用户手势触发。Direct URL 用 `xdg-open`
-  不受此限。
-- **trace bytes 生命周期**：Direct URL 下 UI 是异步 fetch，server 至少要活到那个 GET
-  完成；`--keep` 之外的默认模式应等首个成功 GET 再关，不能 open 完立刻退。
+- **trace bytes 生命周期**：宿主页异步 fetch，server 至少要活到 `/trace` GET 与
+  `/__delivered` beacon 完成；默认模式应等 beacon 再关，`--keep` 常驻供刷新。
 
 ---
 
@@ -238,7 +270,7 @@ cortrace-live [capture opts] [decode opts] [ui opts]
 
 ```mermaid
 flowchart LR
-    P0["P0 最小可用<br>--raw-in + 解码落盘 + CORS server + xdg-open"]
+    P0["P0 ✅ 已完成<br>perfetto_open.py：宿主页+postMessage<br>已有 .perfetto 一键出图（绕 PNA）"]
     P1["P1 管道化<br>cortrace-decode --perf - 免落盘"]
     P2["P2 一键采集<br>--arm 复用 DAP + stream_grab 集成"]
     P3["P3 体验<br>--pin-threads startupCommands 预置视图"]
@@ -246,10 +278,30 @@ flowchart LR
     P0 --> P1 --> P2 --> P3 --> P4
 ```
 
-- **P0** 就能消灭"手动拖文件"这个最大痛点，且不碰 C++ 核心（用已有 `.perfetto` 文件喂
-  CORS server 即可），风险最低、先落地。
+- **P0 ✅ 已完成（上板实测）**：`scripts/perfetto_open.py` 用宿主页 + postMessage，喂已有
+  `.perfetto` 文件即一键在浏览器出图，消灭"手动拖文件"这个最大痛点。不碰 C++ 核心。
+  过程中定位并绕开了 Chrome PNA（§2.1/§2.2）。线程名由解码侧 `--nx-tcbmap` 提供，与本
+  脚本正交。
 - **P1** 之后彻底免落盘。
 - **P4** 独立，等 trace 真的变大再做。
+
+### 7.1 P0 用法（已可用）
+
+```bash
+# 解码出 .perfetto（线程名需 --nx-tcbmap，先用 nx_tcbmap.py 从活板 dump）
+cortrace-decode capture.bin syms.nm --elf nuttx --raw --trace-width 4 \
+    --cycle-time --sysclk-hz 150000000 --nx-switch-stream 1 \
+    --nx-tcbmap tcbmap.txt --perf out.perfetto
+
+# 一键在浏览器打开（起宿主页 + postMessage，绕开 PNA）
+python3 cortrace/scripts/perfetto_open.py out.perfetto
+#   --keep       送达后常驻，可刷新/重开
+#   --no-open    只打印宿主页 URL，不自动开浏览器
+#   --port N     固定端口（默认随机空闲）
+#   --timeout S  等待送达超时（0=永久）
+```
+
+若浏览器拦了弹窗，宿主页会显示一个按钮，点一下即打开 UI 并加载 trace。
 
 ---
 
@@ -269,4 +321,6 @@ flowchart LR
 - Perfetto — Deep linking to the Perfetto UI（`#!/?url=`、postMessage、startupCommands）。
 - Perfetto — Embedding the Perfetto UI（PING/PONG postMessage 协议）。
 - Perfetto — Visualising large traces（`trace_processor server http`，9001 探测）。
+- Chrome — Private Network Access（HTTPS→私有地址子请求的客户端阻断；`#!/?url=` 指向
+  loopback 失败的根因）。
 - 内容依据官方文档整理转述，已按许可要求改写。
