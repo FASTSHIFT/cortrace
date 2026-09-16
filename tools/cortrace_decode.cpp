@@ -677,9 +677,33 @@ int main(int argc, char** argv)
 
         std::map<int, std::string> tracks = machine.tracks();
         if (nx_enabled && !nx_slices.empty()) {
-            // Thread slices share the ETM byte-index space; time them on the
-            // same base and merge with the ETM callstack slices + track names.
-            std::vector<SliceEvent> nx_timed = apply_timebase(nx_slices, tb);
+            // Thread slices carry an ETM byte_index but no cycle_clock/etm_ts of
+            // their own, so apply_cycle_time/apply_etm_timestamp can't time them
+            // directly. Instead ride the SAME execution-time base as the ETM
+            // callstack: build a (byte_index -> tick) table from the already-
+            // timed ETM slices and map each thread slice's byte_index through it
+            // (nearest preceding anchor). This puts threads on ETM execution
+            // time, NOT the lagging FPGA ETF-egress time.
+            std::vector<std::pair<uint64_t, uint64_t>> anchors; // (byte_index, tick)
+            anchors.reserve(timed.size());
+            for (const auto& s : timed)
+                anchors.emplace_back(s.byte_index, s.tick);
+            std::sort(anchors.begin(), anchors.end());
+
+            auto tick_for_byte = [&](uint64_t bidx) -> uint64_t {
+                if (anchors.empty())
+                    return bidx;
+                auto it = std::upper_bound(
+                    anchors.begin(), anchors.end(), std::make_pair(bidx, UINT64_MAX));
+                if (it == anchors.begin())
+                    return anchors.front().second;
+                --it;
+                return it->second;
+            };
+
+            std::vector<SliceEvent> nx_timed = nx_slices;
+            for (auto& s : nx_timed)
+                s.tick = tick_for_byte(s.byte_index);
             timed.insert(timed.end(), nx_timed.begin(), nx_timed.end());
             for (const auto& kv : nx_tracks)
                 tracks[kv.first] = kv.second;
