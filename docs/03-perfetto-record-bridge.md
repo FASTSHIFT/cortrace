@@ -1,7 +1,7 @@
 # Cortrace — Perfetto Record 直连桥（流式，设计文档）
 
 日期：2026-09-16
-状态：设计稿（未实现）
+状态：R0 已实现并上板实测（`scripts/perfetto_record_bridge.py`）；R1-R3 设计稿
 
 让 ui.perfetto.dev 的 **Record new trace** 面板能直接连到 cortrace：用户在 UI 里点
 **Record → Start**，即触发本机的硬件 ETM 采集 + 解码，trace 实时流回 UI 渲染，全程不产生
@@ -195,18 +195,45 @@ ABI 长期稳定，风险可控，但仍是内部面）。相比 P0/P2 的"几�
 
 ```mermaid
 flowchart LR
-    R0["R0 协议探路<br>tracebox websocket_bridge + 最小假 traced<br>QueryState/Enable/ReadBuffers 回一个静态 .perfetto"]
+    R0["R0 ✅ 协议探路<br>tracebox websocket_bridge + 最小假 traced<br>回一个静态 .perfetto 的 packet"]
     R1["R1 接批解码<br>Enable 触发 stream_grab+decode，整体 ReadBuffers 回"]
     R2["R2 流式<br>增量 deframe+OpenCSD+出包，边抓边回"]
     R3["R3 打磨<br>Stop/背压/统计/错误路径"]
     R0 --> R1 --> R2 --> R3
 ```
 
-- **R0** 是关键探路：先让 UI 的 Record 能连上并收到**任意** trace（先回一个预生成的
-  `.perfetto` 的 packet），**证明 Consumer IPC 链路通**，再谈流式。
+- **R0 ✅ 已完成（上板实测）**：`scripts/perfetto_record_bridge.py` 实现了一个假 traced，
+  监听 `/tmp/perfetto-consumer`，手写 IPCFrame + ConsumerPort 最小子集（BindService /
+  QueryServiceState / EnableTracing / ReadBuffers / …）。配合官方 `tracebox
+  websocket_bridge`（ws:8037 ⟷ UNIX socket），UI 的 **Record → Linux → Start** 成功连上、
+  收到预生成 `.perfetto` 的 36248 个 TracePacket 并渲染。实测握手序列与 §3 时序图一致：
+  `BindService → QueryServiceState → EnableTracing → ReadBuffers(has_more→EOF)`。
+  **证明 Consumer IPC 链路通、无需假 ADB**，为 R1/R2 扫清协议风险。TracePacket 直接从
+  `.perfetto`（Trace = repeated TracePacket in field 1）按 field-1 切片取出，无需 proto
+  schema。
 - **R1** 把 EnableTracing 接到现有批解码（复用 `cortrace_live` 的采集+解码），一次性回。
 - **R2** 才做真正的增量流式（§4）。
 - 每阶段可独立验证，风险前移。
+
+### 8.1 R0 复现步骤（已可用）
+
+```bash
+# 1. 官方 tracebox（引导脚本，首次运行自动拉平台二进制）
+curl -sL https://get.perfetto.dev/tracebox -o /tmp/tracebox && chmod +x /tmp/tracebox
+python3 /tmp/tracebox websocket_bridge            # ws:8037 <-> /tmp/perfetto-consumer
+
+# 2. 假 traced，喂一个预生成 .perfetto（另开一个 shell）
+python3 cortrace/scripts/perfetto_record_bridge.py some.perfetto \
+    --sock /tmp/perfetto-consumer
+
+# 3. 浏览器：ui.perfetto.dev -> Record new trace -> Target platform: Linux
+#    -> 选 WebSocket transport -> Start tracing
+#    UI 经 tracebox 连到假 traced，收到 packet 并渲染。
+```
+
+`perfetto_record_bridge.py` 是**协议探针**：R0 只回预生成 trace，不做实采集/流式（那是
+R1/R2）。它手写了 IPC 层 protobuf 编解码（字段少、类型简单），并把 `.perfetto` 的
+field-1 TracePacket 直接切片进 ReadBuffers slice，故不依赖 perfetto proto schema。
 
 ---
 
