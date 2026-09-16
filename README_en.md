@@ -94,7 +94,7 @@ cmake/              CodeCoverage.cmake (gcovr + gate)
 scripts/            format.sh, install-hooks.sh
 .githooks/          pre-commit (format gate)
 .github/workflows/  ci.yml (format + build + test + coverage gate)
-docs/               00-architecture.md, 01-perfetto-live-bridge.md, 02-nxtrace-fusion.md, 03-perfetto-record-bridge.md
+docs/               design docs (architecture, Perfetto bridges, fusion, ...)
 ```
 
 ## Related repos

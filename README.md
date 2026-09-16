@@ -83,7 +83,7 @@ cmake/              CodeCoverage.cmake（gcovr + 门禁）
 scripts/            format.sh, install-hooks.sh
 .githooks/          pre-commit（格式门禁）
 .github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率门禁）
-docs/               00-architecture.md, 01-perfetto-live-bridge.md, 02-nxtrace-fusion.md, 03-perfetto-record-bridge.md
+docs/               设计文档（架构、Perfetto 直连/融合/Record 桥……）
 ```
 
 ## 相关仓库
