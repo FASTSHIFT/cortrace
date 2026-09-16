@@ -8,7 +8,7 @@ the official ARM/Linaro reference decoder
 [OpenCSD](https://github.com/Linaro/OpenCSD), reconstructs the call stack, and
 (planned) pushes to the Perfetto web UI in one step.
 
-> Design philosophy and roadmap live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Design philosophy and roadmap live in [`docs/00-architecture.md`](docs/00-architecture.md).
 
 ## Why
 
@@ -94,7 +94,7 @@ cmake/              CodeCoverage.cmake (gcovr + gate)
 scripts/            format.sh, install-hooks.sh
 .githooks/          pre-commit (format gate)
 .github/workflows/  ci.yml (format + build + test + coverage gate)
-docs/               ARCHITECTURE.md
+docs/               00-architecture.md, 01-perfetto-live-bridge.md
 ```
 
 ## Related repos

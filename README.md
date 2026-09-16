@@ -7,7 +7,7 @@
 [OpenCSD](https://github.com/Linaro/OpenCSD) 解码，重建调用栈，并（规划中）
 一键推送到 Perfetto 网页端。
 
-> 设计理念与路线图见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+> 设计理念与路线图见 [`docs/00-architecture.md`](docs/00-architecture.md)。
 
 ## 为什么
 
@@ -83,7 +83,7 @@ cmake/              CodeCoverage.cmake（gcovr + 门禁）
 scripts/            format.sh, install-hooks.sh
 .githooks/          pre-commit（格式门禁）
 .github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率门禁）
-docs/               ARCHITECTURE.md
+docs/               00-architecture.md, 01-perfetto-live-bridge.md
 ```
 
 ## 相关仓库

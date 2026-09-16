@@ -1,11 +1,13 @@
 # Cortrace — 架构设计文档
 
-> **Cortrace** 把 ARM CoreSight ETM trace 原始字节流转换成函数级
-> [Perfetto](https://ui.perfetto.dev) 时间线。它用 ARM/Linaro 官方参考解码器
-> [OpenCSD](https://github.com/Linaro/OpenCSD) 解码，重建调用栈，并（规划中）
-> 一键推送到 Perfetto 网页端。
+日期：2026-09-16
+状态：早期基础（解码核心 + CI/测试/格式化脚手架）
 
-- **当前状态**：早期基础（解码核心 + CI/测试/格式化脚手架）。
+**Cortrace** 把 ARM CoreSight ETM trace 原始字节流转换成函数级
+[Perfetto](https://ui.perfetto.dev) 时间线。它用 ARM/Linaro 官方参考解码器
+[OpenCSD](https://github.com/Linaro/OpenCSD) 解码，重建调用栈，并（规划中）
+一键推送到 Perfetto 网页端。
+
 - **语言**：C++17 核心，Python/JS 薄工具层。
 - **许可证**：MIT。
 
