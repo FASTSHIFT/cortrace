@@ -1,7 +1,7 @@
 # Cortrace — Perfetto Record 直连桥（流式，设计文档）
 
 日期：2026-09-16
-状态：R0 已实现并上板实测（`scripts/perfetto_record_bridge.py`）；R1-R3 设计稿
+状态：R0+R1 已实现并上板实测（`scripts/perfetto_record_bridge.py`）；R2-R3 设计稿
 
 让 ui.perfetto.dev 的 **Record new trace** 面板能直接连到 cortrace：用户在 UI 里点
 **Record → Start**，即触发本机的硬件 ETM 采集 + 解码，trace 实时流回 UI 渲染，全程不产生
@@ -196,7 +196,7 @@ ABI 长期稳定，风险可控，但仍是内部面）。相比 P0/P2 的"几�
 ```mermaid
 flowchart LR
     R0["R0 ✅ 协议探路<br>tracebox websocket_bridge + 最小假 traced<br>回一个静态 .perfetto 的 packet"]
-    R1["R1 接批解码<br>Enable 触发 stream_grab+decode，整体 ReadBuffers 回"]
+    R1["R1 ✅ 接批解码<br>Enable 触发 stream_grab+decode，分片 ReadBuffers 回"]
     R2["R2 流式<br>增量 deframe+OpenCSD+出包，边抓边回"]
     R3["R3 打磨<br>Stop/背压/统计/错误路径"]
     R0 --> R1 --> R2 --> R3
@@ -211,29 +211,64 @@ flowchart LR
   **证明 Consumer IPC 链路通、无需假 ADB**，为 R1/R2 扫清协议风险。TracePacket 直接从
   `.perfetto`（Trace = repeated TracePacket in field 1）按 field-1 切片取出，无需 proto
   schema。
-- **R1** 把 EnableTracing 接到现有批解码（复用 `cortrace_live` 的采集+解码），一次性回。
+- **R1 ✅ 已完成（上板实测）**：`perfetto_record_bridge.py --capture-cmd` 把 EnableTracing
+  接到真实采集：UI 点 Record → 后台跑 `cortrace_live`（stream_grab 1s + 解码）→ 分片
+  ReadBuffers 回真 trace → UI 渲染出 `worker_compute`/`worker_fileio`/`nsh_main` 泳道。
+  端到端实测：抓 75MB clean、364 线程切换、603224 packets、168 chunks 流回。落地中定位并
+  修了三个关键点（见 §8.2）。
 - **R2** 才做真正的增量流式（§4）。
 - 每阶段可独立验证，风险前移。
 
-### 8.1 R0 复现步骤（已可用）
+### 8.2 R1 落地定位的三个关键点（协议正确性）
+
+三个都不是"猜"出来的，是分离硬件/UI/IPC 变量后隔离实测定位的：
+
+1. **EnableTracingResponse 必须延迟到 tracing 结束才发**（协议语义，非时序玄学）。
+   `consumer_port.proto` 注释明确：`EnableTracingResponse is sent when tracing is
+   disabled`。若在 EnableTracing 时立即回空 reply，UI 会误判"tracing 瞬间结束"→ 进入
+   STOPPING → 在数据就绪前关闭连接。正解：EnableTracing 不回复，后台采集完成后才补发
+   `EnableTracingResponse{disabled=true}`（即"录完了"信号），UI 随后才发 ReadBuffers。
+2. **ReadBuffers 响应体是 O(n) 而非 O(n²)**。用 `blob += slice` 在 60 万 packet 上累加是
+   二次复杂度（每次复制整个 ~16MB 累加器），实测 >60s 卡死。改 `list.append` + 一次
+   `b"".join()`，降到 0.55s。
+3. **IPC 单帧硬上限 128 KiB**（`basic_types.h` `kIPCBufferSize`）。一次性塞 16.5MB 的
+   ReadBuffersResponse 会被 `IPC Frame too large` 拒绝 + 自动断连——这才是 UI 卡住的真正
+   原因。ReadBuffers 是 streaming RPC：改为分片，每个 InvokeMethodReply（has_more=true）
+   的 payload 控制在 96 KiB 以下，末尾一个 has_more=false 作 EOF。603224 packet → 168 片。
+
+另外两个工程点：`stream_grab` 加 `cap_net_raw` capability 免 sudo（否则后台子进程 sudo
+交互卡死）；同一时刻只允许一个采集（并发 stream_grab 抢同一 UDP 端口会 bind 失败），用锁
+互斥，UI 快速重连的重复 EnableTracing 被忽略。
+
+### 8.1 复现步骤（已可用）
 
 ```bash
 # 1. 官方 tracebox（引导脚本，首次运行自动拉平台二进制）
 curl -sL https://get.perfetto.dev/tracebox -o /tmp/tracebox && chmod +x /tmp/tracebox
 python3 /tmp/tracebox websocket_bridge            # ws:8037 <-> /tmp/perfetto-consumer
 
-# 2. 假 traced，喂一个预生成 .perfetto（另开一个 shell）
+# 2a. R0 静态：喂一个预生成 .perfetto（协议探针）
 python3 cortrace/scripts/perfetto_record_bridge.py some.perfetto \
     --sock /tmp/perfetto-consumer
 
+# 2b. R1 实采集：EnableTracing 时跑真实抓包+解码（需 DAP 常驻 + stream_grab 免 sudo）
+#     先给 stream_grab 免 sudo（一次性）：
+#       sudo setcap cap_net_raw,cap_net_admin+eip cortrace-fpga/host/scripts/stream_grab
+python3 cortrace/scripts/perfetto_record_bridge.py --sock /tmp/perfetto-consumer \
+    --capture-out /tmp/rec.perfetto \
+    --capture-cmd "python3 cortrace-fpga/host/scripts/cortrace_live.py \
+        --secs 1 --head-bytes 5000000 --elf nuttx_test/nuttx/nuttx \
+        --trace-width 4 --sysclk-hz 150000000 --nx-switch-stream 1 \
+        --nx-tcbmap /tmp/tcbmap.txt --no-open --save /tmp/rec.perfetto"
+
 # 3. 浏览器：ui.perfetto.dev -> Record new trace -> Target platform: Linux
-#    -> 选 WebSocket transport -> Start tracing
-#    UI 经 tracebox 连到假 traced，收到 packet 并渲染。
+#    -> 选 WebSocket transport -> Start tracing（可点 Stop 提前结束）
+#    UI 经 tracebox 连到假 traced；R1 下会实时抓 1s ETM、解码，再渲染真 trace。
 ```
 
-`perfetto_record_bridge.py` 是**协议探针**：R0 只回预生成 trace，不做实采集/流式（那是
-R1/R2）。它手写了 IPC 层 protobuf 编解码（字段少、类型简单），并把 `.perfetto` 的
-field-1 TracePacket 直接切片进 ReadBuffers slice，故不依赖 perfetto proto schema。
+`perfetto_record_bridge.py` 手写了 IPC 层 protobuf 编解码（字段少、类型简单），并把
+`.perfetto` 的 field-1 TracePacket 直接切片进 ReadBuffers slice，故不依赖 perfetto proto
+schema。R0（静态 trace）验证协议链路，R1（`--capture-cmd`）接真实采集端到端出图。
 
 ---
 

@@ -165,15 +165,51 @@ def encode_invoke_reply(request_id, reply_proto=b"", has_more=False, success=Tru
     return frame
 
 
-def encode_readbuffers_response(packets_bytes):
-    """ReadBuffersResponse { repeated Slice slices = 2; }
-    Slice { bytes data = 1; bool last_slice_for_packet = 2; }
-    One slice per whole TracePacket, each marked last_slice_for_packet."""
-    blob = b""
+def encode_query_service_state_response():
+    """QueryServiceStateResponse { TracingServiceState service_state = 1 }.
+    The UI reads tracing_service_version (field 5) and supports_tracing_sessions
+    (field 7) to fill "Traced version"/"Traced state"; an empty reply makes it
+    show "Failed to decode QueryServiceStateResponse". Provide a minimal valid
+    state so the record flow proceeds."""
+    # TracingServiceState:
+    #   num_sessions = 3 (int32), num_sessions_started = 4 (int32),
+    #   tracing_service_version = 5 (string), supports_tracing_sessions = 7 (bool)
+    state = (
+        _field_varint(3, 0)
+        + _field_varint(4, 0)
+        + _field_string(5, "cortrace-record-bridge 0.1 (fake traced)")
+        + _field_varint(7, 1)
+    )
+    # QueryServiceStateResponse.service_state = 1
+    return _field_bytes(1, state)
+
+
+# Perfetto's IPC has a hard per-message cap (kIPCBufferSize = 128 KiB in
+# basic_types.h). A frame larger than that is rejected and the socket is
+# auto-disconnected. So ReadBuffers MUST be chunked: it's a streaming RPC, so
+# we send many ReadBuffersResponse frames (InvokeMethodReply has_more=true),
+# each under the cap, and a final has_more=false to signal EOF.
+IPC_MAX_PAYLOAD = 96 * 1024  # under 128 KiB, leaving room for frame overhead
+
+
+def iter_readbuffers_chunks(packets_bytes, max_payload=IPC_MAX_PAYLOAD):
+    """Yield ReadBuffersResponse payloads, each an encoded
+    ReadBuffersResponse{ repeated Slice slices = 2 } kept under max_payload.
+    Slice{ bytes data = 1; bool last_slice_for_packet = 2 }, one whole
+    TracePacket per slice."""
+    last = _field_varint(2, 1)
+    parts = []
+    cur = 0
     for pkt in packets_bytes:
-        slice_msg = _field_bytes(1, pkt) + _field_varint(2, 1)
-        blob += _field_bytes(2, slice_msg)
-    return blob
+        slice_field = _field_bytes(2, _field_bytes(1, pkt) + last)
+        if cur + len(slice_field) > max_payload and parts:
+            yield b"".join(parts)
+            parts = []
+            cur = 0
+        parts.append(slice_field)
+        cur += len(slice_field)
+    if parts:
+        yield b"".join(parts)
 
 
 # ---- frame IO -------------------------------------------------------------
@@ -182,9 +218,18 @@ def send_frame(conn, frame_bytes):
 
 
 class Bridge:
-    def __init__(self, packets, verbose=True):
-        self.packets = packets
+    def __init__(self, packets=None, capture_cb=None, verbose=True):
+        # R0: static packets. R1: capture_cb() runs a real capture+decode on
+        # EnableTracing and returns the freshly decoded packet list.
+        self.packets = packets or []
+        self.capture_cb = capture_cb
         self.verbose = verbose
+        # R1 async capture: EnableTracing kicks this off, ReadBuffers waits on it.
+        self._capture_thread = None
+        self._capture_done = threading.Event()
+        self._capture_lock = threading.Lock()
+        if capture_cb is None:
+            self._capture_done.set()  # static R0: packets already present
 
     def log(self, *a):
         if self.verbose:
@@ -221,20 +266,83 @@ class Bridge:
 
         self.log(f"unknown frame req={request_id} (ignored)")
 
+    def _start_capture(self, conn, request_id):
+        """Run the capture+decode in the background so EnableTracing can return
+        immediately (the UI state machine expects Enable to just 'start' the
+        session; it then times out durationMs or the user hits Stop, and only
+        then does ReadBuffers drain). Blocking inside EnableTracing wedges the
+        UI in STOPPING."""
+        # Mutual exclusion: the UI may reconnect and fire several EnableTracing
+        # in quick succession. Only ONE capture may run at a time (concurrent
+        # stream_grab instances fight over the same UDP port -> bind failure).
+        def worker():
+            try:
+                self.log("  capture: running live capture+decode...")
+                self.packets = self.capture_cb()
+                self.log(f"  capture done: {len(self.packets)} packets ready")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"  capture FAILED: {e}")
+                self.packets = []
+            finally:
+                self._capture_done.set()
+                # The EnableTracing reply is DEFERRED until tracing ends (that's
+                # the protocol: EnableTracingResponse{disabled} == "trace over").
+                # Sending it now tells the UI recording is done -> it will then
+                # issue ReadBuffers. Sending it early (at EnableTracing time)
+                # made the UI think tracing ended instantly and it closed the
+                # connection before our data was ready.
+                try:
+                    send_frame(conn, encode_invoke_reply(
+                        request_id, _field_varint(1, 1), has_more=False))
+                    self.log("  sent EnableTracingResponse{disabled} (trace over)")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self.log("  could not send EnableTracingResponse (conn gone)")
+
+        with self._capture_lock:
+            if self._capture_thread is not None and self._capture_thread.is_alive():
+                self.log("  capture already running; ignoring duplicate start")
+                return
+            self._capture_done.clear()
+            self._capture_thread = threading.Thread(target=worker, daemon=True)
+            self._capture_thread.start()
+
     def dispatch(self, conn, request_id, name):
         if name == "ReadBuffers":
-            # Stream all packets in one response, then EOF (has_more=false).
-            resp = encode_readbuffers_response(self.packets)
-            send_frame(conn, encode_invoke_reply(request_id, resp, has_more=True))
+            # Wait for the background capture to finish, then stream its packets
+            # in <128KiB chunks (IPC cap), one InvokeMethodReply per chunk with
+            # has_more=true, then a final has_more=false EOF.
+            if not self._capture_done.is_set():
+                self.log("  ReadBuffers: waiting for capture to finish...")
+                self._capture_done.wait()
+            nchunks = 0
+            for chunk in iter_readbuffers_chunks(self.packets):
+                send_frame(conn, encode_invoke_reply(request_id, chunk, has_more=True))
+                nchunks += 1
             send_frame(conn, encode_invoke_reply(request_id, b"", has_more=False))
-            self.log(f"  -> streamed {len(self.packets)} packets, EOF")
-        elif name in ("EnableTracing", "DisableTracing", "FreeBuffers",
+            self.log(
+                f"  -> streamed {len(self.packets)} packets in {nchunks} chunks, EOF")
+        elif name == "EnableTracing":
+            # DO NOT reply now. Per consumer_port.proto, EnableTracingResponse
+            # is sent when tracing STOPS. Kick off the capture; the worker
+            # sends the deferred reply when it finishes. (R0 static mode has no
+            # capture_cb, so reply immediately as "already done".)
+            if self.capture_cb is not None:
+                self._start_capture(conn, request_id)
+            else:
+                send_frame(conn, encode_invoke_reply(
+                    request_id, _field_varint(1, 1), has_more=False))
+        elif name in ("DisableTracing", "FreeBuffers",
                       "StartTracing", "ChangeTraceConfig", "Flush",
                       "GetTraceStats", "QueryCapabilities"):
-            # Empty-but-successful reply is enough for R0.
+            # Empty-but-successful reply is enough.
             send_frame(conn, encode_invoke_reply(request_id, b"", has_more=False))
-        elif name in ("QueryServiceState", "ObserveEvents"):
-            # Streaming RPCs: send one empty reply with EOF.
+        elif name == "QueryServiceState":
+            # Streaming RPC: one reply carrying a valid TracingServiceState,
+            # then EOF. Empty payload -> UI "Failed to decode".
+            resp = encode_query_service_state_response()
+            send_frame(conn, encode_invoke_reply(request_id, resp, has_more=False))
+        elif name == "ObserveEvents":
+            # Streaming RPC: one empty reply with EOF.
             send_frame(conn, encode_invoke_reply(request_id, b"", has_more=False))
         else:
             send_frame(conn, encode_invoke_reply(request_id, b"", has_more=False))
@@ -264,18 +372,52 @@ class Bridge:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="fake Perfetto traced consumer endpoint (R0 protocol probe)"
+        description="fake Perfetto traced consumer endpoint (R0 static / R1 live)"
     )
-    ap.add_argument("trace", help="pre-generated .perfetto to serve on ReadBuffers")
+    ap.add_argument(
+        "trace",
+        nargs="?",
+        help="R0: pre-generated .perfetto to serve on ReadBuffers",
+    )
+    ap.add_argument(
+        "--capture-cmd",
+        help="R1: shell command run on EnableTracing that must WRITE a "
+        ".perfetto to --capture-out; its packets are then streamed back",
+    )
+    ap.add_argument(
+        "--capture-out",
+        default="/tmp/record_bridge_live.perfetto",
+        help="R1: path the --capture-cmd writes the .perfetto to",
+    )
     ap.add_argument("--sock", default=CONSUMER_SOCK, help="UNIX socket path")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
-    if not os.path.isfile(a.trace):
-        sys.exit(f"trace not found: {a.trace}")
-    packets = load_trace_packets(a.trace)
-    print(f"[record-bridge] loaded {len(packets)} TracePackets from {a.trace}",
-          file=sys.stderr)
+    packets = None
+    capture_cb = None
+
+    if a.capture_cmd:
+        import subprocess
+
+        def capture_cb():
+            if os.path.exists(a.capture_out):
+                os.unlink(a.capture_out)
+            print(f"[record-bridge] $ {a.capture_cmd}", file=sys.stderr, flush=True)
+            r = subprocess.run(a.capture_cmd, shell=True)
+            if r.returncode != 0 or not os.path.isfile(a.capture_out):
+                raise RuntimeError(
+                    f"capture-cmd failed (rc={r.returncode}) or no {a.capture_out}"
+                )
+            return load_trace_packets(a.capture_out)
+
+        print(f"[record-bridge] R1 live mode: capture on EnableTracing",
+              file=sys.stderr)
+    else:
+        if not a.trace or not os.path.isfile(a.trace):
+            sys.exit("R0 mode needs an existing <trace>.perfetto (or use --capture-cmd)")
+        packets = load_trace_packets(a.trace)
+        print(f"[record-bridge] R0 static: {len(packets)} packets from {a.trace}",
+              file=sys.stderr)
 
     if os.path.exists(a.sock):
         os.unlink(a.sock)
@@ -284,7 +426,7 @@ def main(argv=None):
     srv.listen(4)
     print(f"[record-bridge] listening on {a.sock} (Ctrl-C to stop)", file=sys.stderr)
 
-    bridge = Bridge(packets, verbose=not a.quiet)
+    bridge = Bridge(packets=packets, capture_cb=capture_cb, verbose=not a.quiet)
     try:
         while True:
             conn, _ = srv.accept()
