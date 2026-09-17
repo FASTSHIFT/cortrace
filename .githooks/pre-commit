@@ -1,35 +1,69 @@
 #!/usr/bin/env bash
-# Cortrace pre-commit hook: enforce clang-format on staged C/C++ files.
-# Blocks the commit if any staged source is not formatted per .clang-format.
+# Cortrace pre-commit hook: enforce formatting/lint on staged sources.
+#   - C/C++ (include|src|tests|tools/*.cpp|hpp|h|cc): clang-format
+#   - Python (*.py): black --check + pylint
+# Blocks the commit if any staged source fails its gate.
 #
 # Install with: scripts/install-hooks.sh  (sets core.hooksPath to .githooks)
 set -euo pipefail
 
-CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
-if ! command -v "$CLANG_FORMAT" >/dev/null 2>&1; then
-    echo "pre-commit: $CLANG_FORMAT not found; skipping format check" >&2
-    exit 0
-fi
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+fail=0
 
-# staged files matching our source globs
-mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACM \
+# ---- C/C++ : clang-format -------------------------------------------------
+CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
+mapfile -t CXX < <(git diff --cached --name-only --diff-filter=ACM \
     | grep -E '^(include|src|tests|tools)/.*\.(cpp|hpp|h|cc)$' || true)
 
-if [[ ${#STAGED[@]} -eq 0 ]]; then
-    exit 0
-fi
-
-fail=0
-for f in "${STAGED[@]}"; do
-    [[ -f "$f" ]] || continue
-    if ! diff -q <("$CLANG_FORMAT" --style=file "$f") "$f" >/dev/null; then
-        echo "pre-commit: needs formatting -> $f"
-        fail=1
+if [[ ${#CXX[@]} -gt 0 ]]; then
+    if command -v "$CLANG_FORMAT" >/dev/null 2>&1; then
+        for f in "${CXX[@]}"; do
+            [[ -f "$f" ]] || continue
+            if ! diff -q <("$CLANG_FORMAT" --style=file "$f") "$f" >/dev/null; then
+                echo "pre-commit: needs formatting -> $f"
+                fail=1
+            fi
+        done
+        [[ $fail -ne 0 ]] && echo "  fix with 'scripts/format.sh' then re-stage." >&2
+    else
+        echo "pre-commit: $CLANG_FORMAT not found; skipping C/C++ format check" >&2
     fi
-done
-
-if [[ $fail -ne 0 ]]; then
-    echo "" >&2
-    echo "commit blocked: fix formatting with 'scripts/format.sh' then re-stage." >&2
-    exit 1
 fi
+
+# ---- Python : black --check + pylint --------------------------------------
+mapfile -t PY < <(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '\.py$' || true)
+
+if [[ ${#PY[@]} -gt 0 ]]; then
+    if command -v black >/dev/null 2>&1 && command -v pylint >/dev/null 2>&1; then
+        if ! black --check "${PY[@]}" >/dev/null 2>&1; then
+            echo "pre-commit: Python needs formatting (black):"
+            black --check "${PY[@]}" 2>&1 | sed 's/^/  /' || true
+            echo "  fix with 'scripts/format-py.sh' then re-stage." >&2
+            fail=1
+        fi
+        # Lint prod and test files with their respective rcfiles.
+        PROD=() ; TESTS=()
+        for f in "${PY[@]}"; do
+            case "$f" in
+                scripts/tests/*) TESTS+=("$f") ;;
+                *) PROD+=("$f") ;;
+            esac
+        done
+        if [[ ${#PROD[@]} -gt 0 ]] && ! pylint "${PROD[@]}" >/dev/null 2>&1; then
+            echo "pre-commit: pylint issues (run: pylint ${PROD[*]})" >&2
+            fail=1
+        fi
+        if [[ ${#TESTS[@]} -gt 0 ]] \
+            && ! pylint --rcfile=scripts/tests/.pylintrc "${TESTS[@]}" >/dev/null 2>&1; then
+            echo "pre-commit: pylint issues in tests" >&2
+            fail=1
+        fi
+    else
+        echo "pre-commit: black/pylint not found; skipping Python checks" >&2
+    fi
+fi
+
+[[ $fail -ne 0 ]] && { echo "" >&2; echo "commit blocked." >&2; exit 1; }
+exit 0

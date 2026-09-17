@@ -1,0 +1,25 @@
+# Pylint config for tests: inherits intent from ../../.pylintrc but relaxes
+# rules that are normal in test code.
+
+[MESSAGES CONTROL]
+disable =
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    import-outside-toplevel,
+    broad-exception-caught,
+    consider-using-with,
+    superfluous-parens,
+    invalid-name,
+    redefined-builtin,
+    duplicate-code,
+    # test-specific:
+    protected-access,
+    import-error,
+    wrong-import-position,
+    redefined-outer-name,
+    too-few-public-methods,
+    unused-variable
+
+[FORMAT]
+max-line-length = 100

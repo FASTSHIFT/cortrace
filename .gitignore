@@ -73,3 +73,7 @@ build-dbg-*.log
 # Python
 __pycache__/
 *.pyc
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
