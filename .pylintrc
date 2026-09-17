@@ -1,0 +1,31 @@
+# Pylint config for cortrace Python helper scripts (scripts/*.py).
+# Pragmatic: these are host-side tooling, not a library. We keep the
+# correctness/bug checks and relax the docstring/style conventions that add
+# noise without value here.
+
+[MAIN]
+# Files/dirs pylint should never descend into.
+ignore = third_party,build,build-rel,build-cov,build-asan
+
+[MESSAGES CONTROL]
+disable =
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    import-outside-toplevel,
+    broad-exception-caught,
+    consider-using-with,
+    superfluous-parens,
+    invalid-name,
+    redefined-builtin,
+    duplicate-code
+
+[FORMAT]
+max-line-length = 100
+
+[DESIGN]
+max-locals = 25
+max-branches = 20
+max-statements = 60
+max-args = 10
+max-attributes = 12

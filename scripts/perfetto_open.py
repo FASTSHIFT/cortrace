@@ -152,9 +152,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # HTTP/1.1 + explicit Content-Length so the browser streams the body cleanly.
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt, *args):
+    def log_message(self, format, *args):  # stdlib signature: (format, *args)
         if not self.quiet:
-            _eprint("[perfetto_open] " + (fmt % args))
+            _eprint("[perfetto_open] " + (format % args))
 
     def _send(self, code, body=b"", ctype="text/plain"):
         self.send_response(code)

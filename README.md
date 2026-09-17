@@ -59,8 +59,17 @@ cmake --build build --target coverage   # 跑测试 + gcovr，低于门禁则失
 基于 WebKit 的 clang-format（见 `.clang-format`）。
 
 ```sh
-scripts/format.sh          # 原地格式化
+scripts/format.sh          # C/C++ 原地格式化（clang-format）
 scripts/format.sh --check  # CI 模式：有差异则失败
+```
+
+Python 辅助脚本（`scripts/*.py`）用 black 格式化 + pylint 检查（见 `pyproject.toml`、
+`.pylintrc`）：
+
+```sh
+scripts/format-py.sh          # black 原地格式化
+scripts/format-py.sh --check  # CI 模式：black --check + pylint
+python -m pytest scripts/tests --cov --cov-fail-under=80   # 测试 + 覆盖率门禁（80%）
 ```
 
 ## Git 钩子
@@ -71,7 +80,8 @@ scripts/format.sh --check  # CI 模式：有差异则失败
 scripts/install-hooks.sh   # 设置 core.hooksPath = .githooks
 ```
 
-`pre-commit` 钩子会在任何已暂存的 C/C++ 源码不符合 `.clang-format` 时**阻止提交**。
+`pre-commit` 钩子会在任何已暂存的 C/C++ 源码不符合 `.clang-format`、或 Python 源码不符合
+black/pylint 时**阻止提交**。
 
 ## 目录结构
 
@@ -80,9 +90,9 @@ include/cortrace/   公共头文件（element / symbols / callstack …）
 src/                核心实现（不依赖 OpenCSD）
 tests/              零依赖单元测试 + 框架
 cmake/              CodeCoverage.cmake（gcovr + 门禁）
-scripts/            format.sh, install-hooks.sh
-.githooks/          pre-commit（格式门禁）
-.github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率门禁）
+scripts/            format.sh, format-py.sh, install-hooks.sh, *.py + tests/
+.githooks/          pre-commit（C/C++ + Python 格式/lint 门禁）
+.github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率 + Python 门禁）
 docs/               设计文档（架构、Perfetto 直连/融合/Record 桥……）
 ```
 

@@ -61,3 +61,19 @@ jobs:
           name: coverage-html
           path: build/coverage-html
           if-no-files-found: ignore
+
+  python:
+    name: python (black + pylint + pytest coverage gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install tools
+        run: pip install black pylint pytest pytest-cov
+      - name: Format + lint (black --check + pylint)
+        run: bash scripts/format-py.sh --check
+      - name: Tests + coverage gate (fail under 80%)
+        run: pytest scripts/tests --cov --cov-report=term-missing --cov-fail-under=80

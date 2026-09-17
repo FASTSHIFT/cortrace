@@ -31,6 +31,7 @@ import argparse
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 
@@ -122,7 +123,7 @@ CONSUMER_METHODS = [
     (10, "QueryServiceState"),
     (11, "QueryCapabilities"),
 ]
-_METHOD_BY_ID = {i: n for i, n in CONSUMER_METHODS}
+_METHOD_BY_ID = dict(CONSUMER_METHODS)
 SERVICE_ID = 1
 
 
@@ -140,7 +141,9 @@ def load_trace_packets(path):
 
 
 # ---- IPCFrame encode helpers ----------------------------------------------
-def encode_bind_service_reply(request_id, service_name):
+def encode_bind_service_reply(request_id, _service_name):
+    # _service_name is the requested service (only ConsumerPort here); the
+    # reply advertises the method table regardless, so it's unused.
     # methods: repeated MethodInfo{id=1 varint, name=2 string}
     methods_blob = b""
     for mid, mname in CONSUMER_METHODS:
@@ -151,7 +154,9 @@ def encode_bind_service_reply(request_id, service_name):
         + _field_varint(2, SERVICE_ID)  # service_id
         + methods_blob
     )
-    frame = _field_varint(2, request_id) + _field_bytes(4, reply)  # msg_bind_service_reply
+    frame = _field_varint(2, request_id) + _field_bytes(
+        4, reply
+    )  # msg_bind_service_reply
     return frame
 
 
@@ -161,7 +166,9 @@ def encode_invoke_reply(request_id, reply_proto=b"", has_more=False, success=Tru
         inner += _field_varint(2, 1)
     if reply_proto:
         inner += _field_bytes(3, reply_proto)
-    frame = _field_varint(2, request_id) + _field_bytes(6, inner)  # msg_invoke_method_reply
+    frame = _field_varint(2, request_id) + _field_bytes(
+        6, inner
+    )  # msg_invoke_method_reply
     return frame
 
 
@@ -272,6 +279,7 @@ class Bridge:
         session; it then times out durationMs or the user hits Stop, and only
         then does ReadBuffers drain). Blocking inside EnableTracing wedges the
         UI in STOPPING."""
+
         # Mutual exclusion: the UI may reconnect and fire several EnableTracing
         # in quick succession. Only ONE capture may run at a time (concurrent
         # stream_grab instances fight over the same UDP port -> bind failure).
@@ -292,8 +300,12 @@ class Bridge:
                 # made the UI think tracing ended instantly and it closed the
                 # connection before our data was ready.
                 try:
-                    send_frame(conn, encode_invoke_reply(
-                        request_id, _field_varint(1, 1), has_more=False))
+                    send_frame(
+                        conn,
+                        encode_invoke_reply(
+                            request_id, _field_varint(1, 1), has_more=False
+                        ),
+                    )
                     self.log("  sent EnableTracingResponse{disabled} (trace over)")
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     self.log("  could not send EnableTracingResponse (conn gone)")
@@ -320,7 +332,8 @@ class Bridge:
                 nchunks += 1
             send_frame(conn, encode_invoke_reply(request_id, b"", has_more=False))
             self.log(
-                f"  -> streamed {len(self.packets)} packets in {nchunks} chunks, EOF")
+                f"  -> streamed {len(self.packets)} packets in {nchunks} chunks, EOF"
+            )
         elif name == "EnableTracing":
             # DO NOT reply now. Per consumer_port.proto, EnableTracingResponse
             # is sent when tracing STOPS. Kick off the capture; the worker
@@ -329,11 +342,21 @@ class Bridge:
             if self.capture_cb is not None:
                 self._start_capture(conn, request_id)
             else:
-                send_frame(conn, encode_invoke_reply(
-                    request_id, _field_varint(1, 1), has_more=False))
-        elif name in ("DisableTracing", "FreeBuffers",
-                      "StartTracing", "ChangeTraceConfig", "Flush",
-                      "GetTraceStats", "QueryCapabilities"):
+                send_frame(
+                    conn,
+                    encode_invoke_reply(
+                        request_id, _field_varint(1, 1), has_more=False
+                    ),
+                )
+        elif name in (
+            "DisableTracing",
+            "FreeBuffers",
+            "StartTracing",
+            "ChangeTraceConfig",
+            "Flush",
+            "GetTraceStats",
+            "QueryCapabilities",
+        ):
             # Empty-but-successful reply is enough.
             send_frame(conn, encode_invoke_reply(request_id, b"", has_more=False))
         elif name == "QueryServiceState":
@@ -370,7 +393,7 @@ class Bridge:
             self.log("connection closed")
 
 
-def main(argv=None):
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="fake Perfetto traced consumer endpoint (R0 static / R1 live)"
     )
@@ -391,33 +414,49 @@ def main(argv=None):
     )
     ap.add_argument("--sock", default=CONSUMER_SOCK, help="UNIX socket path")
     ap.add_argument("--quiet", action="store_true")
-    a = ap.parse_args(argv)
+    return ap.parse_args(argv)
 
-    packets = None
-    capture_cb = None
 
+def make_capture_cb(capture_cmd, capture_out):
+    """Build the EnableTracing capture callback: run capture_cmd (which must
+    write a .perfetto to capture_out) and return its TracePackets."""
+
+    def _run_capture():
+        if os.path.exists(capture_out):
+            os.unlink(capture_out)
+        print(f"[record-bridge] $ {capture_cmd}", file=sys.stderr, flush=True)
+        r = subprocess.run(capture_cmd, shell=True, check=False)
+        if r.returncode != 0 or not os.path.isfile(capture_out):
+            raise RuntimeError(
+                f"capture-cmd failed (rc={r.returncode}) or no {capture_out}"
+            )
+        return load_trace_packets(capture_out)
+
+    return _run_capture
+
+
+def build_bridge(a):
+    """From parsed args, build the Bridge (R0 static packets or R1 capture_cb).
+    Raises SystemExit for an invalid R0 invocation. No sockets here (testable)."""
     if a.capture_cmd:
-        import subprocess
+        print("[record-bridge] R1 live mode: capture on EnableTracing", file=sys.stderr)
+        cb = make_capture_cb(a.capture_cmd, a.capture_out)
+        return Bridge(capture_cb=cb, verbose=not a.quiet)
+    if not a.trace or not os.path.isfile(a.trace):
+        raise SystemExit(
+            "R0 mode needs an existing <trace>.perfetto (or use --capture-cmd)"
+        )
+    packets = load_trace_packets(a.trace)
+    print(
+        f"[record-bridge] R0 static: {len(packets)} packets from {a.trace}",
+        file=sys.stderr,
+    )
+    return Bridge(packets=packets, verbose=not a.quiet)
 
-        def capture_cb():
-            if os.path.exists(a.capture_out):
-                os.unlink(a.capture_out)
-            print(f"[record-bridge] $ {a.capture_cmd}", file=sys.stderr, flush=True)
-            r = subprocess.run(a.capture_cmd, shell=True)
-            if r.returncode != 0 or not os.path.isfile(a.capture_out):
-                raise RuntimeError(
-                    f"capture-cmd failed (rc={r.returncode}) or no {a.capture_out}"
-                )
-            return load_trace_packets(a.capture_out)
 
-        print(f"[record-bridge] R1 live mode: capture on EnableTracing",
-              file=sys.stderr)
-    else:
-        if not a.trace or not os.path.isfile(a.trace):
-            sys.exit("R0 mode needs an existing <trace>.perfetto (or use --capture-cmd)")
-        packets = load_trace_packets(a.trace)
-        print(f"[record-bridge] R0 static: {len(packets)} packets from {a.trace}",
-              file=sys.stderr)
+def main(argv=None):
+    a = parse_args(argv)
+    bridge = build_bridge(a)
 
     if os.path.exists(a.sock):
         os.unlink(a.sock)
@@ -426,12 +465,13 @@ def main(argv=None):
     srv.listen(4)
     print(f"[record-bridge] listening on {a.sock} (Ctrl-C to stop)", file=sys.stderr)
 
-    bridge = Bridge(packets=packets, capture_cb=capture_cb, verbose=not a.quiet)
     try:
         while True:
             conn, _ = srv.accept()
             bridge.log("new connection")
-            threading.Thread(target=bridge.serve_conn, args=(conn,), daemon=True).start()
+            threading.Thread(
+                target=bridge.serve_conn, args=(conn,), daemon=True
+            ).start()
     except KeyboardInterrupt:
         print("\n[record-bridge] stopping", file=sys.stderr)
     finally:

@@ -69,8 +69,17 @@ The HTML report lands in `build/coverage-html/`.
 WebKit-based clang-format (see `.clang-format`).
 
 ```sh
-scripts/format.sh          # format in place
+scripts/format.sh          # C/C++ format in place (clang-format)
 scripts/format.sh --check  # CI mode: fail on any diff
+```
+
+Python helper scripts (`scripts/*.py`) use black + pylint (see `pyproject.toml`,
+`.pylintrc`):
+
+```sh
+scripts/format-py.sh          # black format in place
+scripts/format-py.sh --check  # CI mode: black --check + pylint
+python -m pytest scripts/tests --cov --cov-fail-under=80   # tests + coverage gate (80%)
 ```
 
 ## Git hooks
@@ -82,7 +91,7 @@ scripts/install-hooks.sh   # sets core.hooksPath = .githooks
 ```
 
 The `pre-commit` hook **blocks the commit** whenever any staged C/C++ source
-does not conform to `.clang-format`.
+does not conform to `.clang-format`, or any staged Python fails black/pylint.
 
 ## Layout
 
@@ -91,9 +100,9 @@ include/cortrace/   Public headers (element / symbols / callstack ...)
 src/                Core implementation (no OpenCSD dependency)
 tests/              Zero-dependency unit tests + framework
 cmake/              CodeCoverage.cmake (gcovr + gate)
-scripts/            format.sh, install-hooks.sh
-.githooks/          pre-commit (format gate)
-.github/workflows/  ci.yml (format + build + test + coverage gate)
+scripts/            format.sh, format-py.sh, install-hooks.sh, *.py + tests/
+.githooks/          pre-commit (C/C++ + Python format/lint gate)
+.github/workflows/  ci.yml (format + build + test + coverage + Python gate)
 docs/               design docs (architecture, Perfetto bridges, fusion, ...)
 ```
 
