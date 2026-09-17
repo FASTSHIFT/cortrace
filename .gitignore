@@ -69,3 +69,7 @@ Testing/
 .cache/
 build-dbg/
 build-dbg-*.log
+
+# Python
+__pycache__/
+*.pyc
