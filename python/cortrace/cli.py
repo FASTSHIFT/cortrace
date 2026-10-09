@@ -3,7 +3,7 @@
 import os
 import sys
 
-from . import __version__
+from . import __version__, banner
 
 HELP = """usage: cortrace <command> [options]
 
@@ -19,6 +19,7 @@ commands:
   version  print the version
 
 Run `cortrace <command> --help` for the options of a command.
+The logo is printed only on a terminal; --no-banner or CORTRACE_NO_BANNER=1 hides it.
 """
 
 
@@ -63,9 +64,18 @@ COMMANDS = {
 }
 
 
+# Commands that run for a while and are driven by a person at a terminal; the
+# short helpers (version, align, tcbmap, open, fpga, decode) stay quiet.
+BANNER_COMMANDS = ("capture", "serve", "fuse")
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    quiet = "--no-banner" in argv
+    argv = [arg for arg in argv if arg != "--no-banner"]
     if not argv or argv[0] in ("-h", "--help", "help"):
+        if not quiet:
+            banner.show()
         print(HELP, end="")
         return 0 if argv else 2
     cmd = argv[0]
@@ -76,4 +86,6 @@ def main(argv=None):
     if handler is None:
         print(f"cortrace: unknown command '{cmd}'\n\n{HELP}", end="", file=sys.stderr)
         return 2
+    if cmd in BANNER_COMMANDS and not quiet:
+        banner.show()
     return handler(argv[1:]) or 0
