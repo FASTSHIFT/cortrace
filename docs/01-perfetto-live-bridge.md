@@ -3,6 +3,10 @@
 日期：2026-09-16
 状态：P0 已实现并上板实测（`scripts/perfetto_open.py`）；P1-P4 设计稿
 
+> **后续（2026-10）**：文中的脚本都已并入 deb 包里的 `cortrace` 命令：`perfetto_open.py` →
+> `cortrace open`，`cortrace_live.py` → `cortrace capture`，`stream_grab` → `cortrace-grab`，
+> `trace_ctrl.py` → `cortrace fpga ctrl`。下文保留当时的设计与实测记录。
+
 把当前"抓包 → 解码成 `.perfetto` 文件 → 手动拖进 ui.perfetto.dev"的三步手工流程，
 收敛成**一条命令 / 一次点击**：触发采集 → 解码 → 浏览器里自动打开 Perfetto 时间线，
 全程不落地文件、不手动拷贝。本文评估 Perfetto 官方支持的本地通信协议，选定方案，
@@ -196,7 +200,7 @@ flowchart TD
 cortrace-live [capture opts] [decode opts] [ui opts]
 
   # 采集
-  --iface enxc8a36266dcae     收流网卡
+  --iface <网卡>              收流网卡
   --secs 1.0                  抓包时长
   --width {4,2,1}             TPIU 端口宽度（同时设 FPGA + 提示 DAP 已配）
   --arm                       抓包前自动 arm（起/复用 DAP 常驻会话）

@@ -2,13 +2,52 @@
 
 [简体中文](README.md) | **English**
 
-**Cortrace** turns a raw ARM CoreSight ETM trace byte stream into a
-function-level [Perfetto](https://ui.perfetto.dev) timeline. It decodes with
-the official ARM/Linaro reference decoder
-[OpenCSD](https://github.com/Linaro/OpenCSD), reconstructs the call stack, and
-(planned) pushes to the Perfetto web UI in one step.
+**Cortrace** turns raw ARM CoreSight ETM/DWT/ITM trace bytes into a function-level
+[Perfetto](https://ui.perfetto.dev) timeline: call stacks, RTOS thread lanes and (NuttX)
+software notes fused with the hardware trace on one time axis. It decodes with the official
+ARM/Linaro reference decoder [OpenCSD](https://github.com/Linaro/OpenCSD) and ships the PC-side
+tools for the FPGA parallel-trace capture appliance.
 
 > Design philosophy and roadmap live in [`docs/00-architecture.md`](docs/00-architecture.md).
+
+## Install (Ubuntu 22.04 amd64)
+
+Download `cortrace_<version>_amd64.deb` from the
+[GitHub Releases](https://github.com/FASTSHIFT/cortrace/releases):
+
+```sh
+sudo apt install ./cortrace_*_amd64.deb      # pulls in python3 and binutils-arm-none-eabi
+cortrace --help
+```
+
+No clone is needed and no privileges either (`cortrace-grab` runs without root or setcap on
+Linux >= 5.7).
+
+| Command | What it does |
+|---------|--------------|
+| `cortrace capture` | grab a parallel trace from the FPGA and decode it to Perfetto (`--fuse` also fuses the NuttX notes) |
+| `cortrace serve` | in ui.perfetto.dev choose *Record new trace -> Linux -> WebSocket 127.0.0.1:8037* and press **Start**: the capture runs and the result comes back in the same page |
+| `cortrace decode` | run `cortrace-decode` (ETM/DWT/ITM -> Perfetto) directly, arguments passed through |
+| `cortrace fuse` | one raw capture -> hardware trace + NuttX notes fused on one time axis |
+| `cortrace tcbmap` / `align` | read the live thread-name map / fit the clock offset between hardware and notes |
+| `cortrace fpga ctrl\|net\|health` | CSR control, link discovery and health readout of the capture appliance |
+| `cortrace open` | open a trace file in ui.perfetto.dev |
+
+**The output directory is always explicit**: `--out-dir DIR` or `export CORTRACE_OUT_DIR=DIR`. A
+capture streams ~75 MB/s and the decoded files are ~5x the raw size (about 450 MB per second of
+trace), so cortrace never picks a location for you; it estimates the space needed before writing
+anything and stops if the disk cannot hold it, and captures over 5 s need `--allow-long`. cortrace
+never deletes files on its own.
+
+```sh
+export CORTRACE_OUT_DIR=~/traces
+cortrace capture --iface enx0123 --elf fw.elf --secs 1 --width 4 --open
+cortrace serve   --iface enx0123 --elf fw.elf          # then press Start in the web page
+```
+
+> cortrace does not enable ETM/DWT/ITM on the target: configure them with your debugger first and
+> keep it attached. Fusing with NuttX's nxtrace needs pynuttx (the pip package, or `--pynuttx DIR` /
+> `$PYNUTTX` pointing at its sources).
 
 ## Why
 
@@ -27,7 +66,7 @@ the full offline pipeline (real OpenCSD library -> call-stack machine) and
 reproduces that result on a CoreMark slice: **11/11 call edges against the ELF,
 0 mismatch, begin/end balanced, 14 SysTick exceptions rendered**.
 
-## Build
+## Build from source
 
 Requires CMake >= 3.16, a C++17 compiler, and optionally `libopencsd-dev` for
 the decoder adapter. The core library + tests build without OpenCSD; with
@@ -38,6 +77,16 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+Build the .deb yourself (inside an ubuntu:22.04 container so the runtime dependencies match that
+release; the version comes from the latest `vX.Y.Z` tag):
+
+```sh
+scripts/build-deb.sh dist                       # produces dist/cortrace_<version>_amd64.deb
+scripts/smoke-deb.sh dist/cortrace_*.deb        # clean container + ordinary user smoke test
+```
+
+Pushing a `v*` tag makes CI build the deb, smoke-test it and attach it to the GitHub release.
 
 ## Offline decode (cortrace-decode)
 
@@ -73,13 +122,12 @@ scripts/format.sh          # C/C++ format in place (clang-format)
 scripts/format.sh --check  # CI mode: fail on any diff
 ```
 
-Python helper scripts (`scripts/*.py`) use black + pylint (see `pyproject.toml`,
-`.pylintrc`):
+The Python package (`python/cortrace`) uses black + pylint (see `pyproject.toml`, `.pylintrc`):
 
 ```sh
 scripts/format-py.sh          # black format in place
 scripts/format-py.sh --check  # CI mode: black --check + pylint
-python -m pytest scripts/tests --cov --cov-fail-under=80   # tests + coverage gate (80%)
+python -m pytest python/tests --cov --cov-fail-under=80   # tests + coverage gate (80%)
 ```
 
 ## Git hooks
@@ -91,41 +139,32 @@ scripts/install-hooks.sh   # sets core.hooksPath = .githooks
 ```
 
 The `pre-commit` hook **blocks the commit** whenever any staged C/C++ source
-does not conform to `.clang-format`, or any staged Python fails black/pylint.
+does not conform to `.clang-format`, or any staged Python fails black/pylint. The `commit-msg` hook
+requires subjects of the form `type(scope): description`; only `docs` may omit the scope.
 
 ## Layout
 
 ```
 include/cortrace/   Public headers (element / symbols / callstack ...)
 src/                Core implementation (no OpenCSD dependency)
-tests/              Zero-dependency unit tests + framework
-cmake/              CodeCoverage.cmake (gcovr + gate)
-scripts/            format.sh, format-py.sh, install-hooks.sh, *.py + tests/
-.githooks/          pre-commit (C/C++ + Python format/lint gate)
-.github/workflows/  ci.yml (format + build + test + coverage + Python gate)
+tools/              cortrace-decode (C++), cortrace-grab (C, FPGA UDP capture)
+python/cortrace/    the cortrace command line and Python package (capture / serve / fuse / fpga ...)
+python/tests/       Python unit tests
+tests/              Zero-dependency C++ unit tests + framework
+cmake/              CodeCoverage.cmake (gcovr + gate), Packaging.cmake (install + deb)
+packaging/debian/   deb postinst / prerm
+scripts/            format*.sh, install-hooks.sh, build-deb.sh, smoke-deb.sh
+.githooks/          pre-commit (format/lint gate), commit-msg (subject format)
+.github/workflows/  ci.yml (format + build + test + coverage + Python gate + deb)
 docs/               design docs (architecture, Perfetto bridges, fusion, ...)
 ```
 
 ## Related repos
 
-- [**cortrace-fpga**](https://github.com/FASTSHIFT/cortrace-fpga) — Artix-7 parallel-ETM capture appliance that streams trace here over UDP
+- [**cortrace-fpga**](https://github.com/FASTSHIFT/cortrace-fpga) — RTL of the Artix-7 parallel-ETM capture appliance plus small board-debug tools (the formal PC-side tools live in this repo)
 - [**stm32h743-etm-trace-firmware**](https://github.com/FASTSHIFT/stm32h743-etm-trace-firmware) — deterministic selftrace target firmware
 
 ## License
 
-MIT © 2026 VIFEX (see [`LICENSE`](LICENSE)).
-
-## NuttX hardware + software fusion (`scripts/cortrace_fuse.py`)
-
-One raw parallel-trace capture (ETM + DWT + ITM through one TPIU) becomes a hardware Perfetto
-trace, a NuttX note Perfetto trace and a fused file. This repo only interprets bytes; a front end
-captures them (e.g. cortrace-fpga's `itm_capture.py`).
-
-```sh
-export PYNUTTX=/path/to/pynuttx          # provides the nxtrace package
-scripts/cortrace_fuse.py --raw raw.bin --elf nuttx --tcbmap tcbmap.txt --out-dir perftrace
-```
-
-- `scripts/nx_tcbmap.py`: read the live pid -> name map through a resident OpenOCD (`--telnet`).
-- `scripts/align_check.py`: pair hardware and note thread switches one by one and fit the clock offset.
-- Paths come from options or environment (`--pynuttx`/`$PYNUTTX`, `--cortrace-decode`/`$CORTRACE_DECODE`); nothing is hard-coded.
+MIT © 2026 VIFEX (see [`LICENSE`](LICENSE)). The statically linked OpenCSD is BSD-3-Clause (see
+`/usr/share/doc/cortrace/LICENSE.opencsd` in the package).

@@ -3,6 +3,11 @@
 日期：2026-09-16
 状态：R0+R1 已实现并上板实测（`scripts/perfetto_record_bridge.py`）；R2-R3 设计稿
 
+> **后续（2026-10）**：实现已迁入 Python 包 `python/cortrace/record_bridge.py`，并由
+> `cortrace serve` 一条命令使用：内置标准库 WebSocket 中继（`wsrelay.py`，带 Origin 白名单，
+> 不再需要 tracebox `websocket_bridge`），点 Start 后在进程内跑 `cortrace capture`（不再 `shell=True`
+> 调外部命令），采集器 `stream_grab` 已改名 `cortrace-grab` 且无需任何特权。下文是当时的设计与实测记录。
+
 让 ui.perfetto.dev 的 **Record new trace** 面板能直接连到 cortrace：用户在 UI 里点
 **Record → Start**，即触发本机的硬件 ETM 采集 + 解码，trace 实时流回 UI 渲染，全程不产生
 中间文件、无需命令行。评估其机制、实现路径、工作量与取舍。**本文只定方案，执行前需确认。**

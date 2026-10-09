@@ -2,12 +2,46 @@
 
 **简体中文** | [English](README_en.md)
 
-**Cortrace** 把 ARM CoreSight ETM trace 原始字节流转换成函数级
-[Perfetto](https://ui.perfetto.dev) 时间线。它用 ARM/Linaro 官方参考解码器
-[OpenCSD](https://github.com/Linaro/OpenCSD) 解码，重建调用栈，并（规划中）
-一键推送到 Perfetto 网页端。
+**Cortrace** 把 ARM CoreSight ETM/DWT/ITM trace 原始字节流转换成函数级
+[Perfetto](https://ui.perfetto.dev) 时间线：调用栈、RTOS 线程泳道，以及（NuttX）软件 note
+与硬件 trace 融合在同一条时间轴上。它用 ARM/Linaro 官方参考解码器
+[OpenCSD](https://github.com/Linaro/OpenCSD) 解码，并自带 FPGA 并口采集器的 PC 侧工具。
 
 > 设计理念与路线图见 [`docs/00-architecture.md`](docs/00-architecture.md)。
+
+## 安装（Ubuntu 22.04 amd64）
+
+从 [GitHub Releases](https://github.com/FASTSHIFT/cortrace/releases) 下载 `cortrace_<版本>_amd64.deb`：
+
+```sh
+sudo apt install ./cortrace_*_amd64.deb      # 自动装上 python3 和 binutils-arm-none-eabi
+cortrace --help
+```
+
+装好后无需克隆仓库，也不需要任何特权（`cortrace-grab` 在 Linux ≥ 5.7 上免 root、免 setcap）。
+
+| 命令 | 作用 |
+|------|------|
+| `cortrace capture` | 从 FPGA 抓一段并口 trace → 解码成 Perfetto（`--fuse` 同时融合 NuttX note） |
+| `cortrace serve` | 在 ui.perfetto.dev 的 *Record new trace → Linux → WebSocket 127.0.0.1:8037* 里点 **Start** 即抓取，结果回到同一页面 |
+| `cortrace decode` | 直接调用 `cortrace-decode`（ETM/DWT/ITM → Perfetto），参数原样透传 |
+| `cortrace fuse` | 一份原始抓取 → 硬件 trace + NuttX note，融合在同一条时间轴 |
+| `cortrace tcbmap` / `align` | 读活线程名映射 / 拟合硬件与 note 的时钟偏移 |
+| `cortrace fpga ctrl\|net\|health` | FPGA 采集器的 CSR 控制、链路发现、健康读出 |
+| `cortrace open` | 在 ui.perfetto.dev 打开一个 trace 文件 |
+
+**输出目录必须显式给出**：`--out-dir DIR` 或 `export CORTRACE_OUT_DIR=DIR`。抓取约 75 MB/s，
+解码产物约为原始数据的 5 倍（1 秒 ≈ 450 MB），所以 cortrace 不会替你选位置；开始前会估算所需
+空间并在不够时直接报错，超过 5 秒的抓取需要 `--allow-long`。cortrace 不会自动删除任何文件。
+
+```sh
+export CORTRACE_OUT_DIR=~/traces
+cortrace capture --iface enx0123 --elf fw.elf --secs 1 --width 4 --open
+cortrace serve   --iface enx0123 --elf fw.elf          # 然后在网页里点 Start
+```
+
+> 本工具不负责在目标上启用 ETM/DWT/ITM：先用调试器配置好并保持连接。
+> 与 NuttX 的 nxtrace 融合需要 pynuttx（`pip install` 的包，或 `--pynuttx DIR` / `$PYNUTTX` 指向其源码）。
 
 ## 为什么
 
@@ -20,7 +54,7 @@
 当前 `cortrace-decode` CLI 已跑通完整离线链路（OpenCSD 真链库 → 调用栈机），在 CoreMark
 slice 上复现该结果：**11/11 调用边对 ELF、0 mismatch、begin/end 配平、14 个 SysTick 渲染**。
 
-## 构建
+## 从源码构建
 
 需要 CMake ≥ 3.16、C++17 编译器，以及（可选）`libopencsd-dev` 用于解码器适配层。
 核心库 + 测试在没有 OpenCSD 时也能构建；装了 OpenCSD 时额外产出 `cortrace-decode` CLI。
@@ -30,6 +64,15 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+自己打 deb（在 ubuntu:22.04 容器里构建，运行时依赖才与 22.04 一致；版本取自最新的 `vX.Y.Z` tag）：
+
+```sh
+scripts/build-deb.sh dist                       # 产出 dist/cortrace_<版本>_amd64.deb
+scripts/smoke-deb.sh dist/cortrace_*.deb        # 干净容器 + 普通用户的冒烟测试
+```
+
+推送 `v*` tag 时，CI 会构建 deb、跑冒烟测试，并把它挂到对应的 GitHub Release。
 
 ## 离线解码（cortrace-decode）
 
@@ -63,13 +106,13 @@ scripts/format.sh          # C/C++ 原地格式化（clang-format）
 scripts/format.sh --check  # CI 模式：有差异则失败
 ```
 
-Python 辅助脚本（`scripts/*.py`）用 black 格式化 + pylint 检查（见 `pyproject.toml`、
+Python 包（`python/cortrace`）用 black 格式化 + pylint 检查（见 `pyproject.toml`、
 `.pylintrc`）：
 
 ```sh
 scripts/format-py.sh          # black 原地格式化
 scripts/format-py.sh --check  # CI 模式：black --check + pylint
-python -m pytest scripts/tests --cov --cov-fail-under=80   # 测试 + 覆盖率门禁（80%）
+python -m pytest python/tests --cov --cov-fail-under=80   # 测试 + 覆盖率门禁（80%）
 ```
 
 ## Git 钩子
@@ -81,40 +124,32 @@ scripts/install-hooks.sh   # 设置 core.hooksPath = .githooks
 ```
 
 `pre-commit` 钩子会在任何已暂存的 C/C++ 源码不符合 `.clang-format`、或 Python 源码不符合
-black/pylint 时**阻止提交**。
+black/pylint 时**阻止提交**。`commit-msg` 钩子要求主题为 `type(scope): 描述`，只有 `docs`
+可以省略 scope。
 
 ## 目录结构
 
 ```
 include/cortrace/   公共头文件（element / symbols / callstack …）
 src/                核心实现（不依赖 OpenCSD）
-tests/              零依赖单元测试 + 框架
-cmake/              CodeCoverage.cmake（gcovr + 门禁）
-scripts/            format.sh, format-py.sh, install-hooks.sh, *.py + tests/
-.githooks/          pre-commit（C/C++ + Python 格式/lint 门禁）
-.github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率 + Python 门禁）
+tools/              cortrace-decode（C++）、cortrace-grab（C，FPGA UDP 采集）
+python/cortrace/    cortrace 命令行与 Python 包（capture / serve / fuse / fpga …）
+python/tests/       Python 单元测试
+tests/              C++ 零依赖单元测试 + 框架
+cmake/              CodeCoverage.cmake（gcovr + 门禁）、Packaging.cmake（install + deb）
+packaging/debian/   deb 的 postinst / prerm
+scripts/            format*.sh、install-hooks.sh、build-deb.sh、smoke-deb.sh
+.githooks/          pre-commit（格式/lint 门禁）、commit-msg（提交主题）
+.github/workflows/  ci.yml（格式 + 构建 + 测试 + 覆盖率 + Python 门禁 + deb）
 docs/               设计文档（架构、Perfetto 直连/融合/Record 桥……）
 ```
 
 ## 相关仓库
 
-- [**cortrace-fpga**](https://github.com/FASTSHIFT/cortrace-fpga) — Artix-7 并口 ETM 采集设备，通过 UDP 把 trace 送来解码
+- [**cortrace-fpga**](https://github.com/FASTSHIFT/cortrace-fpga) — Artix-7 并口 ETM 采集器的 RTL 与板级调试小工具（PC 侧正式工具都在本仓库）
 - [**stm32h743-etm-trace-firmware**](https://github.com/FASTSHIFT/stm32h743-etm-trace-firmware) — 确定性 selftrace 目标板固件
 
 ## 许可证
 
-MIT © 2026 VIFEX（见 [`LICENSE`](LICENSE)）。
-
-## NuttX 软硬融合（`scripts/cortrace_fuse.py`）
-
-一份原始并口抓取（ETM + DWT + ITM 同一个 TPIU）→ 硬件 Perfetto、NuttX note Perfetto、融合文件。
-本仓库只管"拿到字节之后"的解析；抓取由前端负责（例如 cortrace-fpga 的 `itm_capture.py`）。
-
-```sh
-export PYNUTTX=/path/to/pynuttx          # 提供 nxtrace 包
-scripts/cortrace_fuse.py --raw raw.bin --elf nuttx --tcbmap tcbmap.txt --out-dir perftrace
-```
-
-- `scripts/nx_tcbmap.py`：从常驻 OpenOCD（`--telnet`）读活线程的 pid → 名字映射。
-- `scripts/align_check.py`：硬件与 note 的线程切换逐个配对，拟合时钟偏移。
-- 路径一律用参数或环境变量（`--pynuttx`/`$PYNUTTX`、`--cortrace-decode`/`$CORTRACE_DECODE`），没有写死的本机路径。
+MIT © 2026 VIFEX（见 [`LICENSE`](LICENSE)）。包内静态链接的 OpenCSD 为 BSD-3-Clause（见
+`/usr/share/doc/cortrace/LICENSE.opencsd`）。
