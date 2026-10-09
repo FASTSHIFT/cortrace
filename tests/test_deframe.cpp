@@ -223,3 +223,71 @@ TEST(deframe_multi_demuxes_all_streams)
         CHECK(r.src_index[2][i] > r.src_index[2][i - 1]);
     CHECK(r.src_index[2][0] >= 4); // after the sync word
 }
+
+namespace {
+// Inverse of assemble_nibbles for phase {parity 0, order 0}: raw bytes that
+// reassemble to exactly `bytes` (raw[k] high nibble = nibble 2k, raw[k+1] low
+// nibble = nibble 2k+1).
+std::vector<uint8_t> raw_from_assembled(const std::vector<uint8_t>& bytes)
+{
+    std::vector<uint8_t> nibs;
+    for (uint8_t b : bytes) {
+        nibs.push_back(b & 0xF);
+        nibs.push_back(static_cast<uint8_t>(b >> 4));
+    }
+    std::vector<uint8_t> raw(bytes.size() + 1, 0);
+    for (std::size_t k = 0; k < bytes.size(); ++k) {
+        raw[k] = static_cast<uint8_t>(raw[k] | (nibs[2 * k] << 4));
+        raw[k + 1] = static_cast<uint8_t>(raw[k + 1] | nibs[2 * k + 1]);
+    }
+    return raw;
+}
+
+// Sync word then `n` frames on stream 2, each holding 12 zero bytes + 0x80
+// (one ETMv4 A-sync per frame).
+std::vector<uint8_t> async_frames(int n)
+{
+    std::vector<uint8_t> wire = { 0xFF, 0xFF, 0xFF, 0x7F };
+    for (int i = 0; i < n; ++i) {
+        std::vector<uint8_t> f(16, 0);
+        f[0] = static_cast<uint8_t>((2 << 1) | 1);
+        f[13] = 0x80;
+        wire.insert(wire.end(), f.begin(), f.end());
+    }
+    return wire;
+}
+} // namespace
+
+TEST(deframe_prefix_search_matches_full_search)
+{
+    const auto raw = raw_from_assembled(async_frames(400));
+    DeframePhase def;
+    const auto full = deframe_raw_capture_multi(raw.data(), raw.size(), true, def, 0);
+    const auto pref = deframe_raw_capture_multi(raw.data(), raw.size(), true, def, 1024);
+    CHECK(full.async_count > 0);
+    CHECK_EQ(pref.phase.parity, full.phase.parity);
+    CHECK_EQ(pref.phase.order, full.phase.order);
+    CHECK_EQ((long)pref.async_count, (long)full.async_count);
+    CHECK_EQ((long)pref.frames, (long)full.frames);
+    CHECK_EQ((long)pref.streams.at(2).size(), (long)full.streams.at(2).size());
+
+    const auto sfull = deframe_raw_capture(raw.data(), raw.size(), 2, true, def, 0);
+    const auto spref = deframe_raw_capture(raw.data(), raw.size(), 2, true, def, 1024);
+    CHECK_EQ(spref.phase.parity, sfull.phase.parity);
+    CHECK_EQ((long)spref.etm.size(), (long)sfull.etm.size());
+}
+
+TEST(deframe_prefix_without_async_falls_back_to_full_search)
+{
+    // Prefix (first 64 B) is all zeros: no A-sync there, so the whole capture
+    // must be searched and still find the right phase.
+    auto wire = async_frames(400);
+    std::vector<uint8_t> lead(2048, 0);
+    wire.insert(wire.begin(), lead.begin(), lead.end());
+    const auto raw = raw_from_assembled(wire);
+    DeframePhase def;
+    const auto r = deframe_raw_capture_multi(raw.data(), raw.size(), true, def, 64);
+    CHECK(r.async_count > 0);
+    CHECK_EQ(r.phase.parity, 0);
+    CHECK_EQ(r.phase.order, 0);
+}

@@ -224,12 +224,20 @@ DeframeResult tpiu_deframe(
     return r;
 }
 
-DeframeResult deframe_raw_capture(
-    const uint8_t* raw, std::size_t len, int want_stream, bool search, const DeframePhase& phase)
+DeframeResult deframe_raw_capture(const uint8_t* raw, std::size_t len, int want_stream, bool search,
+    const DeframePhase& phase, std::size_t search_prefix)
 {
     if (!search) {
         auto data = assemble_nibbles(raw, len, phase);
         return tpiu_deframe(data, want_stream, phase);
+    }
+
+    // Pick the phase on a prefix, then deframe everything once.
+    if (search_prefix > 0 && len > search_prefix) {
+        const DeframeResult probe
+            = deframe_raw_capture(raw, search_prefix, want_stream, true, phase, search_prefix);
+        if (probe.async_count > 0)
+            return deframe_raw_capture(raw, len, want_stream, false, probe.phase, search_prefix);
     }
 
     // Search phases; keep the best by post-deframe A-sync count, tie-broken by
@@ -306,12 +314,20 @@ MultiDeframeResult tpiu_deframe_multi(const std::vector<uint8_t>& data, const De
     return r;
 }
 
-MultiDeframeResult deframe_raw_capture_multi(
-    const uint8_t* raw, std::size_t len, bool search, const DeframePhase& phase)
+MultiDeframeResult deframe_raw_capture_multi(const uint8_t* raw, std::size_t len, bool search,
+    const DeframePhase& phase, std::size_t search_prefix)
 {
     if (!search) {
         auto data = assemble_nibbles(raw, len, phase);
         return tpiu_deframe_multi(data, phase);
+    }
+
+    // Pick the phase on a prefix, then deframe everything once.
+    if (search_prefix > 0 && len > search_prefix) {
+        const MultiDeframeResult probe
+            = deframe_raw_capture_multi(raw, search_prefix, true, phase, search_prefix);
+        if (probe.async_count > 0)
+            return deframe_raw_capture_multi(raw, len, false, probe.phase, search_prefix);
     }
 
     // Search phases (width-aware, see deframe_raw_capture); keep the one whose

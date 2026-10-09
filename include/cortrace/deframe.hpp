@@ -66,6 +66,9 @@ struct MultiDeframeResult {
     std::size_t syncs = 0;
 };
 
+// How much of a raw capture the phase search looks at before locking the winner.
+constexpr std::size_t kPhaseSearchPrefix = 8u << 20;
+
 // Deframe an assembled byte stream, demuxing every ATB stream at once.
 MultiDeframeResult tpiu_deframe_multi(const std::vector<uint8_t>& data, const DeframePhase& phase);
 
@@ -73,8 +76,14 @@ MultiDeframeResult tpiu_deframe_multi(const std::vector<uint8_t>& data, const De
 // `search` is true, try all four phases and keep the one whose stream 2 has the
 // most ETMv4 A-syncs (the ETM stream is the alignment anchor for the whole
 // capture; the other streams ride the same frames/phase).
-MultiDeframeResult deframe_raw_capture_multi(
-    const uint8_t* raw, std::size_t len, bool search, const DeframePhase& phase);
+//
+// The phase is a property of the wiring, not of the data, so the search runs on
+// the first `search_prefix` bytes only and the winner is then applied to the
+// whole capture (4 full passes over a 700 MB capture were most of the deframe
+// time). If no candidate shows an A-sync in the prefix, the whole capture is
+// searched as before.
+MultiDeframeResult deframe_raw_capture_multi(const uint8_t* raw, std::size_t len, bool search,
+    const DeframePhase& phase, std::size_t search_prefix = kPhaseSearchPrefix);
 
 // Assemble bytes from a raw capture under a fixed phase (no search).
 std::vector<uint8_t> assemble_nibbles(
@@ -88,8 +97,9 @@ DeframeResult tpiu_deframe(
 // Full front end: nibble-assemble + TPIU-deframe a raw FPGA capture. If
 // `search` is true, try all four phases and keep the one with the most
 // post-deframe A-syncs; otherwise use `phase` as given.
-DeframeResult deframe_raw_capture(
-    const uint8_t* raw, std::size_t len, int want_stream, bool search, const DeframePhase& phase);
+// Same prefix-search rule as deframe_raw_capture_multi.
+DeframeResult deframe_raw_capture(const uint8_t* raw, std::size_t len, int want_stream, bool search,
+    const DeframePhase& phase, std::size_t search_prefix = kPhaseSearchPrefix);
 
 // Count ETMv4 A-syncs (>= 11 zero bytes followed by 0x80) in a byte stream.
 int count_etmv4_async(const uint8_t* data, std::size_t len);
