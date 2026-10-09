@@ -78,8 +78,8 @@ flowchart TD
    DWT 配置清掉）。cortrace 只负责采集和解码，不负责在目标上启用 trace。本仓库的参考做法是
    cortrace-fpga 里的 `nxtrace_rtt.sh`（OpenOCD 常驻会话，启动时打印 `nxtrace_dap: armed`）。
 2. FPGA 采集器通过网线直连 PC。采集用的网口需要配置主机地址 `<HOST_IP>`/24（FPGA 往这个地址推 UDP 流，
-   端口 5555）：`sudo ip addr add <HOST_IP>/24 dev <nic>`。主机地址不对时现象是 ARP 正常、但抓到 0 字节。
-   具体地址见 cortrace-fpga 的文档。
+   端口 5555）。这一步需要 root，而且 `ip addr add` 重启后会丢，**建议一次性配成持久的**，见下面
+   "网口地址"一节。主机地址不对时现象是 ARP 正常、但抓到 0 字节。具体地址见 cortrace-fpga 的文档。
 3. 准备好固件的 ELF（解码要从 ELF 读指令）。
 
 接线和各自的职责：
@@ -97,6 +97,53 @@ flowchart LR
     NIC --> CT
     DBG -.->|"telnet :4444<br/>cortrace tcbmap 读线程名"| CT
 ```
+
+**网口地址：配一次，重启后也在**
+
+日常的抓取流程里，**只有这一步需要 sudo**（装 deb 本身要 apt，另说）：`cortrace capture`、`serve`、
+`cortrace-grab` 都不需要特权（只有可选的 `cortrace fpga net` ARP 探测需要 `CAP_NET_RAW`）。
+给采集网口配地址有两种方式：
+
+- 临时（重启即失效，适合试一下）：
+
+  ```sh
+  sudo ip addr add <HOST_IP>/24 dev <nic>
+  ```
+
+- 持久（推荐，配一次就行）。桌面版 Ubuntu 用 NetworkManager：
+
+  ```sh
+  # 新建一个固定地址、插上网线就自动生效的连接
+  sudo nmcli con add type ethernet ifname <nic> con-name cortrace-fpga \
+       ipv4.method manual ipv4.addresses <HOST_IP>/24 ipv6.method disabled \
+       connection.autoconnect yes
+  # 如果已经有一个手动配好的连接，只是没设自动连接：
+  sudo nmcli con modify <连接名> connection.autoconnect yes
+  ```
+
+  服务器版 Ubuntu 用 netplan（保存为 `/etc/netplan/60-cortrace-fpga.yaml`，然后 `sudo netplan apply`）：
+
+  ```yaml
+  network:
+    version: 2
+    ethernets:
+      <nic>:
+        dhcp4: false
+        dhcp6: false
+        addresses: [<HOST_IP>/24]
+        optional: true      # 没插采集器时不要拖慢开机
+  ```
+
+配完用 `ip -br addr show <nic>` 确认：状态是 `UP`，并且能看到 `<HOST_IP>/24`。注意：
+
+- `<nic>` 用 `enx` 开头的那个名字（由网卡 MAC 生成，重启后不变）；用 `ip -br link` 查。
+- 网口 `UP` 要求网线真的接着采集器，没接时是 `NO-CARRIER`，不是地址的问题。
+- 不要让别的网口也配到同一个 `/24`，否则内核可能把发给 FPGA 的包从另一个口发出去。
+- cortrace 目前**不会**在抓取前检查网口有没有这个地址：地址缺失时的表现就是抓到 0 字节，
+  先用上面的 `ip -br addr show <nic>` 排除这一项。
+
+> 这些 `nmcli` / netplan 命令是标准用法，文档里没有在真机上逐条执行；不同发行版或网络管理器的细节
+> 以系统自带文档为准。
 
 **软件**：Ubuntu 22.04 amd64。融合模式额外需要 pynuttx 和它的 Python 依赖（第 4 节）。
 
@@ -310,7 +357,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     S["抓完了，结果不对？"] --> Q1{"raw 文件有数据吗？<br/>(1 秒约 75 MB)"}
-    Q1 -->|"0 字节"| A1["检查网口 HOST_IP、5555 端口占用<br/>cortrace fpga ctrl rearm"]
+    Q1 -->|"0 字节"| A1["ip -br addr show nic：<br/>有 HOST_IP 吗？是 UP 吗？<br/>再查 5555 端口占用"]
     Q1 -->|"有"| Q2{"解码摘要<br/>stream health 是 clean 吗？"}
     Q2 -->|"lost-sync / overflow"| A2["ETM 在片上溢出：<br/>降 CPU 频率或减少 note"]
     Q2 -->|"clean"| Q3{"Threads 泳道里<br/>有线程切换吗？"}
@@ -328,7 +375,7 @@ flowchart TD
 | `capture NIC not given` | 没指定网口：加 `--iface`，或 `export CORTRACE_IFACE=…`（用 `--raw-in` 时不需要） |
 | `not enough free space in …` | 输出目录所在磁盘放不下，按提示换目录或清理 |
 | `--secs … is longer than 5 s` | 确实要抓更长就加 `--allow-long` |
-| `cortrace-grab failed`，或抓到 0 字节 | 网口没配 `<HOST_IP>`（见第 2 节）；或者 5555 端口被上一次没退出的抓取占着：`fuser -k 5555/udp` |
+| `cortrace-grab failed`，或抓到 0 字节 | 先 `ip -br addr show <nic>`：网口没有 `<HOST_IP>`（重启后 `ip addr add` 会丢，见第 2 节"网口地址"）或是 `NO-CARRIER`；再查 5555 端口是否被上一次没退出的抓取占着：`fuser -k 5555/udp` |
 | 解码摘要里 `lost-sync` / `overflow` 不为 0 | ETM 在片上溢出：降低 CPU 频率、关掉不需要的 note（syscall/heap），或降低 trace 量。融合模式下 ITM 的 note 也占 TPIU 带宽 |
 | 线程名都是 `tcb@0x…` | 没给 `--tcbmap`；用 `cortrace tcbmap` 生成（需要调试器的 OpenOCD 常驻） |
 | `nxtrace failed … Last lines of nxtrace_<tag>.log` | pynuttx 或它的依赖没装好（常见是缺 `protobuf`）；报错里带了日志尾部 |
