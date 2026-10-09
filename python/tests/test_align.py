@@ -24,7 +24,7 @@ def test_load_tcbmap_parses_name_to_pid(tmp_path):
 
 
 def test_load_tcbmap_none_is_empty():
-    assert ac.load_tcbmap(None) == {}
+    assert not ac.load_tcbmap(None)
 
 
 def test_hw_switches_tsv_uses_pid_suffix_then_tcbmap_then_name(tmp_path):
@@ -86,7 +86,7 @@ def test_global_fit_no_overlap_returns_none():
     hw = [(0, 1), (100, 2)]
     notes = [(0, 9)]  # pid never seen in hw
     off, res = ac.global_fit(hw, notes, 10)
-    assert off is None and res == []
+    assert off is None and not res
 
 
 def run_main(monkeypatch, argv):

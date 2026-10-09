@@ -104,6 +104,7 @@ MDW_OUT = "0x20000000: 20001000 00000002\n"
 
 def test_read_words_one_shot_openocd_parses_stdout_and_stderr(monkeypatch):
     monkeypatch.setattr(tm, "OOCD_TELNET", None)
+    monkeypatch.setattr(tm, "OOCD_CONFIGS", ["probe.cfg", "chip.cfg"])
     seen = {}
 
     def fake_run(cmd, **_kw):
@@ -114,6 +115,7 @@ def test_read_words_one_shot_openocd_parses_stdout_and_stderr(monkeypatch):
     got = tm.oocd_read_words(0x20000000, 3)
     assert got == {0x20000000: 0x20001000, 0x20000004: 2, 0x2000000C: 7}
     assert "mdw 0x20000000 3" in seen["cmd"]
+    assert seen["cmd"][:5] == ["openocd", "-f", "probe.cfg", "-f", "chip.cfg"]
 
 
 def test_main_writes_tcbmap(monkeypatch, tmp_path):
@@ -139,17 +141,39 @@ def test_main_writes_tcbmap(monkeypatch, tmp_path):
     monkeypatch.setattr(tm, "oocd_read_words", fake_read)
     out = tmp_path / "map.txt"
     monkeypatch.setattr(
-        sys, "argv", ["nx_tcbmap.py", "--elf", "nuttx", "--out", str(out)]
+        sys,
+        "argv",
+        ["tcbmap", "--elf", "nuttx", "--out", str(out)]
+        + ["--openocd-config", "probe.cfg", "--openocd-config", "chip.cfg"],
     )
     tm.main()
+    assert tm.OOCD_CONFIGS == ["probe.cfg", "chip.cfg"]
     lines = out.read_text(encoding="utf-8").splitlines()
     assert lines[1] == f"0x{tcb:08x}\t3\tworker"
     assert len(lines) == 2
 
 
+def test_main_needs_a_way_to_reach_the_target(monkeypatch, capsys):
+    monkeypatch.delenv("CORTRACE_OPENOCD_CONFIG", raising=False)
+    with pytest.raises(SystemExit) as e:
+        tm.main(["--elf", "nuttx"])
+    assert e.value.code == 2
+    assert "--telnet" in capsys.readouterr().err
+
+
+def test_openocd_config_from_environment(monkeypatch):
+    monkeypatch.setenv("CORTRACE_OPENOCD_CONFIG", "a.cfg b.cfg")
+    monkeypatch.setattr(tm, "sym", lambda *a: None)
+    with pytest.raises(SystemExit):  # stops at the missing symbols, after setup
+        tm.main(["--elf", "nuttx"])
+    assert tm.OOCD_CONFIGS == ["a.cfg", "b.cfg"]
+
+
 def test_main_exits_without_pidhash_symbols(monkeypatch):
     monkeypatch.setattr(tm, "sym", lambda *a: None)
-    monkeypatch.setattr(sys, "argv", ["nx_tcbmap.py", "--elf", "nuttx"])
+    monkeypatch.setattr(
+        sys, "argv", ["tcbmap", "--elf", "nuttx", "--telnet", "127.0.0.1:1"]
+    )
     with pytest.raises(SystemExit):
         tm.main()
 
@@ -158,6 +182,8 @@ def test_main_exits_on_bad_pidhash(monkeypatch):
     monkeypatch.setattr(tm, "sym", lambda nm, elf, name: 0x20000000)
     monkeypatch.setattr(tm, "build_symtab", lambda nm, elf: ([], []))
     monkeypatch.setattr(tm, "oocd_read_words", lambda addr, n: {})
-    monkeypatch.setattr(sys, "argv", ["nx_tcbmap.py", "--elf", "nuttx"])
+    monkeypatch.setattr(
+        sys, "argv", ["tcbmap", "--elf", "nuttx", "--telnet", "127.0.0.1:1"]
+    )
     with pytest.raises(SystemExit):
         tm.main()

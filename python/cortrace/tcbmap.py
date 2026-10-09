@@ -13,18 +13,23 @@ Output: a text map "0xTCB<TAB>pid<TAB>name" (one per line) that
 cortrace-decode consumes with --nx-tcbmap.
 
 Usage:
-  nx_tcbmap.py --elf nuttx --out tcbmap.txt
+  cortrace tcbmap --elf nuttx --out tcbmap.txt
+    (--telnet HOST:PORT | --openocd-config FILE [--openocd-config FILE ...])
     [--pid-off 0x30] [--entry-off 0x3c] [--nm arm-none-eabi-nm]
 """
 
 import argparse
 import bisect
+import os
 import re
 import subprocess
 import sys
 
-OOCD_IFACE = "interface/cmsis-dap.cfg"
-OOCD_TARGET = "target/stm32h7x.cfg"
+# OpenOCD config files (-f) that describe the probe and the target. There is no
+# built-in default: they depend on the debugger and the chip, so they come from
+# --openocd-config (repeatable) or $CORTRACE_OPENOCD_CONFIG. Not needed with
+# --telnet, where the resident OpenOCD already owns the probe.
+OOCD_CONFIGS = []
 # When set ("host:port"), read target memory through an already-running OpenOCD
 # telnet server instead of spawning a one-shot session. Needed while a resident
 # session (nxtrace_rtt.sh) owns the probe: a second connect would clear the DWT.
@@ -96,12 +101,10 @@ def oocd_read_words(addr, count):
                     except ValueError:
                         pass
         return words
-    cmd = [
-        "openocd",
-        "-f",
-        OOCD_IFACE,
-        "-f",
-        OOCD_TARGET,
+    cmd = ["openocd"]
+    for cfg in OOCD_CONFIGS:
+        cmd += ["-f", cfg]
+    cmd += [
         "-c",
         "gdb_port disabled",
         "-c",
@@ -146,9 +149,27 @@ def main(argv=None):
         metavar="HOST:PORT",
         help="read via a running OpenOCD telnet server (e.g. 127.0.0.1:4444)",
     )
+    ap.add_argument(
+        "--openocd-config",
+        action="append",
+        default=None,
+        metavar="FILE",
+        help="OpenOCD config file for the probe and the target, e.g. "
+        "interface/cmsis-dap.cfg then target/<chip>.cfg; repeat the option for "
+        "each file (default: $CORTRACE_OPENOCD_CONFIG, space separated). "
+        "Required unless --telnet is used.",
+    )
     a = ap.parse_args(argv)
-    global OOCD_TELNET  # pylint: disable=global-statement
+    global OOCD_TELNET, OOCD_CONFIGS  # pylint: disable=global-statement
     OOCD_TELNET = a.telnet
+    OOCD_CONFIGS = (
+        a.openocd_config or os.environ.get("CORTRACE_OPENOCD_CONFIG", "").split()
+    )
+    if not OOCD_TELNET and not OOCD_CONFIGS:
+        ap.error(
+            "no way to reach the target: pass --telnet HOST:PORT (resident "
+            "OpenOCD) or --openocd-config FILE (probe, then target)"
+        )
     pid_off = int(a.pid_off, 0)
     entry_off = int(a.entry_off, 0)
 
