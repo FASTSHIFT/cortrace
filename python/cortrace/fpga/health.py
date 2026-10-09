@@ -30,7 +30,7 @@ import time
 IP = "192.168.10.42"  # module-level target; main() sets it from argv
 PORT = 5001
 CTRL_PORT = 5002
-REG_SOFTRST = 0x10  # CSR: soft-reset the trace capture path (MMCM/FIFO/debug)
+REG_SOFTRST = 0x10  # CSR: clear the sticky error + counters (older: also resets MMCM)
 
 
 def soft_reset(ip):
@@ -44,7 +44,7 @@ def soft_reset(ip):
     except socket.timeout:
         pass
     s.close()
-    print("soft reset pulsed (trace MMCM/FIFO + debug counters cleared)")
+    print("soft reset pulsed (clears the sticky error and counters)")
 
 
 # dbg_regfile address map (low byte of ext_addr, page 0xFF1x..0xFF3x)
@@ -82,6 +82,7 @@ FEATURE_NAMES = {
     1: "DDR3 ring",
     2: "stream self-test",
     3: "run-time port width",
+    4: "clearable errors",  # CSR 0x10 clears the sticky error and counters
 }
 FLAG_DIRTY, FLAG_PRERELEASE, FLAG_UNTAGGED = 1, 2, 4
 EARLIEST_BUILD = 1_577_836_800  # 2020-01-01; anything older is not a real stamp
@@ -413,6 +414,14 @@ def health_check(
     ident = Identity(s)
     for line in ident.describe():
         print(line)
+    # After --reset a latched error is fresh only if this bitstream can clear it.
+    fresh = reset and ident.features is not None and bool(ident.features & 16)
+    if reset and not fresh:
+        print(
+            "[INFO] this bitstream cannot clear its sticky error (no clear "
+            "register), so --reset changed nothing there; any latched error "
+            "below may be old"
+        )
 
     live = rd8(s, A_LIVE)
     have_first = (live >> 7) & 1
@@ -465,7 +474,7 @@ def health_check(
             "quality by the decode summary (`stream health ... clean`)."
         )
     return report_counters_and_errors(
-        s, reset, have_first, first_code, first_time, first_ctx
+        s, fresh, have_first, first_code, first_time, first_ctx
     )
 
 
@@ -560,7 +569,7 @@ def report_counters_and_errors(
         # The register is sticky: it holds the FIRST error since the bitstream
         # was loaded or the last reset, so on its own it says nothing about the
         # present. Only after --reset (which clears it) is a latched error fresh.
-        tag = "[FAIL]" if reset else "[WARN]"
+        tag = "[FAIL]" if reset else "[WARN]"  # `reset` here means "fresh"
         print(f"{tag} FIRST_ERR = 0x{first_code:04x} ({name})")
         print(
             f"       @ t={t_ms:.2f} ms (cyc={first_time}), "

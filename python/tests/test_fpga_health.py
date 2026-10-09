@@ -56,11 +56,23 @@ def test_sticky_error_is_only_a_warning_without_reset(board, capsys):
 def test_sticky_error_after_reset_is_a_failure(board, capsys):
     mem, _ = board
     healthy(mem)
+    stamp(mem, features=0b1_1110)  # bit4: the bitstream can clear the error
     put(mem, health.A_LIVE, 0b1111_1010)
     put(mem, health.A_FIRST_CODE, 0x0401, 2)
     assert run("--reset") == 2
     out = capsys.readouterr().out
     assert "[FAIL] FIRST_ERR = 0x0401" in out and "may predate" not in out
+
+
+def test_reset_on_a_bitstream_that_cannot_clear_stays_a_warning(board, capsys):
+    mem, _ = board
+    healthy(mem)
+    stamp(mem, features=0b0_1110)  # no clear register
+    put(mem, health.A_LIVE, 0b1111_1010)
+    put(mem, health.A_FIRST_CODE, 0x0301, 2)
+    assert run("--reset") == 0
+    out = capsys.readouterr().out
+    assert "cannot clear its sticky error" in out and "[WARN] FIRST_ERR" in out
 
 
 @pytest.mark.parametrize(
@@ -69,6 +81,7 @@ def test_sticky_error_after_reset_is_a_failure(board, capsys):
 def test_other_error_codes_get_their_advice(board, capsys, code, text):
     mem, _ = board
     healthy(mem)
+    stamp(mem, features=0b1_1110)
     put(mem, health.A_LIVE, 0b1111_1010)
     put(mem, health.A_FIRST_CODE, code, 2)
     assert run("--reset") == 2
