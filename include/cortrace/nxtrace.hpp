@@ -1,7 +1,7 @@
 // Cortrace — nxtrace: DWT data-value packet parsing for RTOS thread-switch
 // tracking (doc 01 §5.2).
 //
-// On the H743 parallel path the DWT emits a "data trace data-value" packet on
+// On a parallel-TPIU path the DWT emits a "data trace data-value" packet on
 // each WRITE to a watched address (a comparator programmed FUNCTION=0x0D). When
 // the watched address is the RTOS "current task" pointer (NuttX g_running_tasks),
 // the packet payload IS the new TCB pointer, captured at the instant of the

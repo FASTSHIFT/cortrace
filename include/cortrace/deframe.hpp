@@ -1,6 +1,6 @@
 // Cortrace — FPGA raw-capture front end: nibble reassemble + TPIU deframe.
 //
-// The A7-Lite capture appliance streams the STM32 parallel-trace port as a raw
+// The FPGA capture appliance streams the target's parallel-trace (TPIU) port as a raw
 // byte sequence (two nibbles per TRACECLK period, {trace_a hi, trace_b lo}).
 // Turning that into the bare ETMv4 byte stream OpenCSD wants is three byte-wise
 // passes that used to run in slow host Python (deframe_to_etm.py):

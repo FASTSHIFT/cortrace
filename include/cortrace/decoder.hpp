@@ -26,8 +26,9 @@ namespace cortrace {
 // Called for every decoded element, in trace order.
 using ElementSink = std::function<void(const Element&)>;
 
-// Minimal ETMv4 target configuration. Defaults match the STM32H743 Cortex-M7
-// used to validate the pipeline; override the IDR/config words for other cores.
+// Minimal ETMv4 target configuration. The defaults describe a Cortex-M7 ETMv4
+// (the core the pipeline was validated on); for other cores set the IDR/config
+// words from the target's TRCIDRn / TRCCONFIGR (cortrace-decode --etm-*).
 struct EtmV4Config {
     uint32_t idr0 = 0x080006e1;
     uint32_t idr1 = 0x4100f401;

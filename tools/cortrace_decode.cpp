@@ -334,6 +334,32 @@ int main(int argc, char** argv)
         .scan<'i', int>()
         .default_value(2)
         .help("TPIU ATB stream to deframe (default 2 = ETM; 1 = DWT/ITM packets)");
+    // ETMv4 trace-unit description. The defaults describe a Cortex-M7 ETMv4;
+    // for another core give the values read from its TRCIDRn / TRCCONFIGR.
+    const EtmV4Config etm_defaults;
+    const struct {
+        const char* name;
+        const char* what;
+        uint32_t EtmV4Config::*field;
+    } etm_opts[] = {
+        { "--etm-idr0", "TRCIDR0", &EtmV4Config::idr0 },
+        { "--etm-idr1", "TRCIDR1", &EtmV4Config::idr1 },
+        { "--etm-idr2", "TRCIDR2", &EtmV4Config::idr2 },
+        { "--etm-idr8", "TRCIDR8", &EtmV4Config::idr8 },
+        { "--etm-idr12", "TRCIDR12", &EtmV4Config::idr12 },
+        { "--etm-configr", "TRCCONFIGR", &EtmV4Config::configr },
+        { "--etm-trace-id", "TRCTRACEIDR (ATB id; keep --want-stream in step)",
+            &EtmV4Config::traceidr },
+    };
+    for (const auto& o : etm_opts) {
+        char def[16];
+        std::snprintf(def, sizeof def, "0x%08x", etm_defaults.*(o.field));
+        program.add_argument(o.name)
+            .metavar("VAL")
+            .scan<'i', long long>()
+            .default_value(static_cast<long long>(etm_defaults.*(o.field)))
+            .help(std::string(o.what) + " of the target's ETMv4 (default " + def + ")");
+    }
     // nxtrace: RTOS thread-switch overlay from the DWT data-value stream.
     program.add_argument("--nx-switch-stream")
         .metavar("ID")
@@ -496,7 +522,9 @@ int main(int argc, char** argv)
     CallStackMachine machine(syms);
     Coverage cov(syms, tb);
 
-    EtmV4Config cfg; // STM32H743 Cortex-M7 defaults
+    EtmV4Config cfg; // Cortex-M7 ETMv4 defaults, overridable with --etm-*
+    for (const auto& o : etm_opts)
+        cfg.*(o.field) = static_cast<uint32_t>(program.get<long long>(o.name));
     auto decoder = make_opencsd_decoder(cfg);
     if (!decoder) {
         std::fprintf(stderr, "error: failed to create OpenCSD decoder\n");
