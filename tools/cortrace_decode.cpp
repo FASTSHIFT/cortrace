@@ -35,6 +35,8 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -52,8 +54,11 @@ struct Coverage {
     const SymbolTable& syms;
     const TimeBase& tb;
 
-    std::map<std::string, long> ranges_by_fn; // fn -> # of instr ranges landing in it
-    std::set<std::string> visited; // functions with any instruction coverage
+    // fn -> # of instr ranges landing in it. Keyed by the symbol table's own
+    // name string (function_at returns a stable reference), so the per-range hot
+    // path is one pointer-hash bump instead of two string-keyed tree lookups;
+    // ranges_by_fn() folds same-named symbols together for the report.
+    std::unordered_map<const std::string*, long> range_counts;
 
     bool blind_pending = false;
     bool have_first = false;
@@ -66,13 +71,19 @@ struct Coverage {
     {
     }
 
+    std::map<std::string, long> ranges_by_fn() const
+    {
+        std::map<std::string, long> out;
+        for (const auto& kv : range_counts)
+            out[*kv.first] += kv.second;
+        return out;
+    }
+
     void observe(const Element& e)
     {
         switch (e.kind) {
         case ElementKind::InstrRange: {
-            const std::string& fn = syms.function_at(e.start_addr);
-            ranges_by_fn[fn]++;
-            visited.insert(fn);
+            range_counts[&syms.function_at(e.start_addr)]++;
             if (!tb.empty()) {
                 const uint64_t now = tb.ns_for(e.byte_index);
                 if (!have_first) {
@@ -103,7 +114,7 @@ struct Coverage {
             // ETM/ETF overflow. Only the latter is data loss, so split them:
             // the initial run of NO_SYNC (before any InstrRange) is startup;
             // anything after we've decoded instructions is a real loss.
-            if (visited.empty())
+            if (range_counts.empty())
                 startup_sync_count++;
             else
                 nosync_count++;
@@ -683,13 +694,16 @@ int main(int argc, char** argv)
     // ever entered across a blind spot (dropped call) or is a leaf reached by
     // fall-through/tail-call. Surface these explicitly.
     const auto& begins = machine.slices();
-    std::set<std::string> rendered;
+    // Millions of begin events share a few hundred names: hash, don't tree-insert.
+    std::unordered_set<std::string> rendered_set;
     for (const auto& s : begins)
         if (s.begin)
-            rendered.insert(s.name);
+            rendered_set.insert(s.name);
+    const std::set<std::string> rendered(rendered_set.begin(), rendered_set.end());
 
+    const auto ranges_by_fn = cov.ranges_by_fn();
     std::vector<std::pair<long, std::string>> missed; // (range count, fn)
-    for (const auto& kv : cov.ranges_by_fn) {
+    for (const auto& kv : ranges_by_fn) {
         const std::string& fn = kv.first;
         if (fn == "?" || fn == "<root>")
             continue;
@@ -700,7 +714,7 @@ int main(int argc, char** argv)
         [](const auto& a, const auto& b) { return a.first > b.first; });
 
     std::fprintf(stderr, "\n=== function coverage ===\n");
-    std::fprintf(stderr, "  functions with instruction flow : %zu\n", cov.visited.size());
+    std::fprintf(stderr, "  functions with instruction flow : %zu\n", ranges_by_fn.size());
     std::fprintf(stderr, "  functions rendered as slices    : %zu\n", rendered.size());
     if (missed.empty()) {
         std::fprintf(stderr, "  MISSED (flow but no slice)      : none\n");
