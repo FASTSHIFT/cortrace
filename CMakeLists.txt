@@ -88,9 +88,16 @@ endif()
 set(CORTRACE_HAVE_OPENCSD OFF)
 set(OPENCSD_SUBMODULE ${CMAKE_SOURCE_DIR}/third_party/opencsd)
 option(CORTRACE_OPENCSD_FROM_SOURCE "Build vendored OpenCSD submodule from source" ON)
+# Static OpenCSD: cortrace-decode then has no libopencsd*.so to ship or find at
+# run time. The .deb is built this way; local dev keeps shared libs (faster
+# incremental links, symbols visible in gdb).
+option(CORTRACE_OPENCSD_STATIC "Link the vendored OpenCSD statically" OFF)
 
 if(CORTRACE_OPENCSD_FROM_SOURCE AND EXISTS ${OPENCSD_SUBMODULE}/CMakeLists.txt)
     message(STATUS "OpenCSD: building vendored submodule from source (debuggable)")
+    if(CORTRACE_OPENCSD_STATIC)
+        set(OPENCSD_BUILD_MIN_LIB_STATIC ON CACHE BOOL "" FORCE)
+    endif()
     # Keep OpenCSD's own dev/test targets off; we only need the libraries.
     set(OPENCSD_BUILD_DEV_TARGETS OFF CACHE BOOL "" FORCE)
     set(OPENCSD_FULL_PROJECT_LAYOUT OFF CACHE BOOL "" FORCE)
@@ -162,3 +169,6 @@ add_test(NAME unit COMMAND cortrace_tests)
 # ---- coverage target with a minimum line-coverage gate --------------------
 set(CORTRACE_MIN_COVERAGE 80 CACHE STRING "Minimum line coverage percent for the gate")
 add_coverage_target(cortrace_tests ${CORTRACE_MIN_COVERAGE})
+
+# ---- install rules + Debian package (cpack -G DEB) -------------------------
+include(Packaging)

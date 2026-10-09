@@ -77,3 +77,6 @@ __pycache__/
 .coverage.*
 .pytest_cache/
 htmlcov/
+
+# release packages built by scripts/build-deb.sh
+dist/

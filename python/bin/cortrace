@@ -1,0 +1,7 @@
+#!/usr/bin/python3
+"""cortrace command line entry point (see `cortrace --help`)."""
+import sys
+
+from cortrace.cli import main
+
+sys.exit(main())

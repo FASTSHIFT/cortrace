@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -72,8 +73,53 @@ jobs:
         with:
           python-version: "3.10"
       - name: Install tools
-        run: pip install black pylint pytest pytest-cov protobuf
+        run: pip install black pylint pytest pytest-cov
       - name: Format + lint (black --check + pylint)
         run: bash scripts/format-py.sh --check
       - name: Tests + coverage gate (fail under 80%)
         run: pytest python/tests --cov --cov-report=term-missing --cov-fail-under=80
+
+  deb:
+    name: .deb (ubuntu 22.04) build + smoke test
+    # 22.04 runner: the package must link against 22.04's glibc/libstdc++.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # the version comes from `git describe` on the v* tags
+
+      - name: Build the package (in an ubuntu:22.04 container)
+        run: bash scripts/build-deb.sh dist
+
+      - name: Smoke test (clean container, non-root user)
+        run: bash scripts/smoke-deb.sh dist/cortrace_*.deb
+
+      - name: Decode contract (Python tools vs the packaged cortrace-decode)
+        run: |
+          pip install pytest
+          dpkg-deb -x dist/cortrace_*.deb /tmp/pkg
+          CORTRACE_DECODE=/tmp/pkg/usr/bin/cortrace-decode \
+            python3 -m pytest python/tests/test_decode_contract.py -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortrace-deb
+          path: dist/cortrace_*.deb
+
+  release:
+    name: attach the .deb to the GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [format, build-test-coverage, python, deb]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cortrace-deb
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/cortrace_*.deb
+          generate_release_notes: true
