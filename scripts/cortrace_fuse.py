@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +84,44 @@ def fuse(hw, note_pf, out, pb2=None, pynuttx=None):
                 dst.write(chunk)
         dst.write(trace.SerializeToString())
     return remapped
+
+
+TIMESTAMP_FIELDS = frozenset({"timestamp", "last_read_event_timestamp"})
+
+
+def _is_repeated(field):
+    if hasattr(field, "is_repeated"):
+        return field.is_repeated
+    return field.label == field.LABEL_REPEATED
+
+
+def shift_timestamps(msg, offset_ns):
+    """Add offset_ns to every absolute timestamp in a protobuf message tree.
+
+    Same result as running nxtrace with --ts-offset-ns (byte-identical on a real
+    note trace), but without re-parsing the notes: nxtrace runs once, in
+    parallel with the hardware decode, and the offset (known only after the
+    decode) is applied afterwards.
+    """
+    for field, value in msg.ListFields():
+        if field.type == field.TYPE_MESSAGE:
+            for sub in value if _is_repeated(field) else [value]:
+                shift_timestamps(sub, offset_ns)
+        elif field.name in TIMESTAMP_FIELDS:
+            setattr(msg, field.name, value + offset_ns)
+
+
+def shift_trace_file(src, dst, offset_ns, pb2=None, pynuttx=None):
+    """Write src (a Perfetto trace) to dst with all timestamps moved by offset_ns."""
+    if pb2 is None:
+        pb2 = load_pb2(pynuttx)
+    trace = pb2.Trace()
+    with open(src, "rb") as f:
+        trace.ParseFromString(f.read())
+    if offset_ns:
+        shift_timestamps(trace, offset_ns)
+    with open(dst, "wb") as f:
+        f.write(trace.SerializeToString())
 
 
 def parse_args(argv=None):
@@ -172,6 +211,41 @@ def decode_command(a, paths, syms):
     return cmd
 
 
+def start_decode(cmd, on_notes_ready):
+    """Run cortrace-decode, echoing its key lines; call on_notes_ready() as soon
+    as the note stream file is complete (the decode keeps going for a while)."""
+    print("[cortrace-fuse] $ " + " ".join(str(c) for c in cmd), file=sys.stderr)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+
+    def pump():
+        for line in proc.stdout:
+            if any(
+                k in line
+                for k in ("itm notes", "DWT stream", "stream health", "wrote", "error")
+            ):
+                print("  " + line.strip(), file=sys.stderr)
+            if line.startswith("itm notes: port"):
+                on_notes_ready()
+
+    thread = threading.Thread(target=pump, daemon=True)
+    thread.start()
+    return proc, thread
+
+
+def nxtrace_commands(a, paths):
+    """nxtrace invocations over the extracted note stream: a text dump (for the
+    clock fit) and the note Perfetto trace, both on the note clock."""
+    nx = [sys.executable, "-m", "nxtrace", "capture", "--elf", a.elf]
+    nx += ["--freq", str(int(a.sysclk_hz))]
+    if a.tcbmap:
+        nx += ["--pid-names", a.tcbmap]
+    dump = nx + ["--format", "dump", "file", paths["notes_bin"]]
+    pftrace = nx + ["-o", paths["note_raw"], "file", paths["notes_bin"]]
+    return dump, pftrace
+
+
 def main(argv=None):
     a = parse_args(argv)
     os.makedirs(a.out_dir, exist_ok=True)
@@ -180,6 +254,7 @@ def main(argv=None):
         for key, name in (
             ("hw", "hw_{tag}.perfetto"),
             ("notes_bin", "notes_{tag}.bin"),
+            ("note_raw", "note_{tag}.raw.pftrace"),
             ("note_pf", "note_{tag}.pftrace"),
             ("note_txt", "note_{tag}.txt"),
             ("runs", "hwruns_{tag}.tsv"),
@@ -192,14 +267,37 @@ def main(argv=None):
     with open(syms, "w", encoding="utf-8") as f:
         subprocess.run([a.nm, "-n", a.elf], stdout=f, check=True)
 
-    dec = run(decode_command(a, paths, syms), capture_output=True, text=True)
-    for line in (dec.stderr + dec.stdout).splitlines():
-        if any(
-            k in line
-            for k in ("itm notes", "DWT stream", "stream health", "wrote", "error")
-        ):
-            print("  " + line.strip(), file=sys.stderr)
-    if dec.returncode or not os.path.isfile(paths["notes_bin"]):
+    env = dict(
+        os.environ,
+        PYTHONPATH=a.pynuttx + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    )
+    if os.path.exists(paths["note_raw"]):
+        os.unlink(paths["note_raw"])  # nxtrace appends to an existing output file
+    note_jobs = []
+
+    def start_note_jobs():
+        """The note stream is complete long before the hardware decode ends, so
+        decode the notes (two nxtrace passes) while the ETM decode still runs."""
+        dump, pftrace = nxtrace_commands(a, paths)
+        txt = open(paths["note_txt"], "w", encoding="utf-8")
+        note_jobs.append(
+            (subprocess.Popen(dump, cwd=a.pynuttx, env=env, stdout=txt,
+                              stderr=subprocess.DEVNULL), txt)
+        )  # fmt: skip
+        note_jobs.append(
+            (subprocess.Popen(pftrace, cwd=a.pynuttx, env=env,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL), None)
+        )  # fmt: skip
+
+    proc, pump_thread = start_decode(decode_command(a, paths, syms), start_note_jobs)
+    returncode = proc.wait()
+    pump_thread.join()
+    for job, txt in note_jobs:
+        job.wait()
+        if txt:
+            txt.close()
+    if returncode or not os.path.isfile(paths["notes_bin"]):
         sys.exit("decode failed")
     if os.path.getsize(paths["notes_bin"]) == 0:
         sys.exit(
@@ -207,27 +305,8 @@ def main(argv=None):
             "set and ITM TER enabled?"
         )
 
-    env = dict(
-        os.environ,
-        PYTHONPATH=a.pynuttx + os.pathsep + os.environ.get("PYTHONPATH", ""),
-    )
-    nx = [sys.executable, "-m", "nxtrace", "capture", "--elf", a.elf]
-    nx += ["--freq", str(int(a.sysclk_hz))]
-    if a.tcbmap:
-        nx += ["--pid-names", a.tcbmap]
-
-    # 1) text dump of the notes, used to fit the hw<->note clock offset.
-    with open(paths["note_txt"], "w", encoding="utf-8") as f:
-        run(
-            nx + ["--format", "dump", "file", paths["notes_bin"]],
-            cwd=a.pynuttx,
-            env=env,
-            stdout=f,
-            stderr=subprocess.DEVNULL,
-        )
-
-    # 2) fit the constant offset between the two clocks (same capture, so the
-    #    switches pair up one-to-one; the offset is only the clock origin).
+    # Fit the constant offset between the two clocks (same capture, so the
+    # switches pair up one-to-one; the offset is only the clock origin).
     align = [
         sys.executable,
         os.path.join(HERE, "align_check.py"),
@@ -246,21 +325,16 @@ def main(argv=None):
         with open(paths["offset"], encoding="utf-8") as f:
             offset = int(f.read())
 
-    # 3) note Perfetto, moved onto the hardware time axis when the fit worked.
-    if os.path.exists(paths["note_pf"]):
-        os.unlink(paths["note_pf"])  # nxtrace appends to an existing output file
-    nxo = list(nx)
-    if offset is not None:
-        nxo += ["--ts-offset-ns", str(-offset)]  # note_ns - offset = hw_ns
-    run(
-        nxo + ["-o", paths["note_pf"], "file", paths["notes_bin"]],
-        cwd=a.pynuttx,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    # Note Perfetto, moved onto the hardware time axis when the fit worked
+    # (note_ns - offset = hw_ns).
+    if not os.path.isfile(paths["note_raw"]):
+        sys.exit("nxtrace produced no note trace")
+    shift_trace_file(
+        paths["note_raw"], paths["note_pf"], -(offset or 0), pynuttx=a.pynuttx
     )
+    os.unlink(paths["note_raw"])
 
-    # 4) one file with both: concatenation is a valid Perfetto merge.
+    # One file with both: concatenation is a valid Perfetto merge.
     fused = None
     if offset is not None and not a.no_fuse:
         fused = paths["fused"]
