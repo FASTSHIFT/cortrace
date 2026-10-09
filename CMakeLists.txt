@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortrace VERSION 0.1.0 LANGUAGES C CXX)
+project(cortrace LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+include(Version) # CORTRACE_VERSION from the VERSION file (PEP 440)
 include(CodeCoverage)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -152,6 +153,7 @@ if(CORTRACE_HAVE_OPENCSD)
         add_executable(${tool_name} ${tool_src})
         target_link_libraries(${tool_name} PRIVATE cortrace_core)
         target_include_directories(${tool_name} PRIVATE ${ARGPARSE_INCLUDE})
+        target_compile_definitions(${tool_name} PRIVATE CORTRACE_VERSION="${CORTRACE_VERSION}")
         cortrace_set_warnings(${tool_name})
     endforeach()
 endif()
@@ -165,6 +167,8 @@ target_link_libraries(cortrace_tests PRIVATE cortrace_core)
 target_include_directories(cortrace_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 cortrace_set_warnings(cortrace_tests)
 add_test(NAME unit COMMAND cortrace_tests)
+add_test(NAME version_helpers
+         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/tests/version_test.cmake)
 
 # ---- coverage target with a minimum line-coverage gate --------------------
 set(CORTRACE_MIN_COVERAGE 80 CACHE STRING "Minimum line coverage percent for the gate")

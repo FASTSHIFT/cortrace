@@ -40,6 +40,11 @@
 #include <utility>
 #include <vector>
 
+// Set by CMake from the VERSION file (cmake/Version.cmake).
+#ifndef CORTRACE_VERSION
+#define CORTRACE_VERSION "unknown"
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
@@ -256,7 +261,7 @@ private:
 
 int main(int argc, char** argv)
 {
-    argparse::ArgumentParser program("cortrace-decode");
+    argparse::ArgumentParser program("cortrace-decode", CORTRACE_VERSION);
     program.add_description(
         "Decode a captured ETMv4 stream: raw ETM bytes -> OpenCSD -> call-stack "
         "-> Perfetto, with quality metrics and a function-coverage report.");

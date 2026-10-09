@@ -88,6 +88,24 @@ scripts/smoke-deb.sh dist/cortrace_*.deb        # clean container + ordinary use
 
 Pushing a `v*` tag makes CI build the deb, smoke-test it and attach it to the GitHub release.
 
+### Versioning
+
+The single source is the `VERSION` file at the repository root (the first release is `1.0.0`),
+a subset of [PEP 440](https://peps.python.org/pep-0440/): `MAJOR.MINOR.PATCH` with an optional
+`aN`/`bN`/`rcN` (pre-release), `.postN` or `.devN` suffix, e.g. `1.0.0`, `1.0.0a1`, `1.0.0rc1`,
+`1.0.0.post1`, `1.0.0.dev3`.
+
+| Build | `cortrace version` / `cortrace-decode --version` |
+|-------|--------------------------------------------------|
+| HEAD is exactly the `v<VERSION>` tag (a release) | `1.0.0` |
+| any other commit (a development build) | `1.0.0+git<commits>.<hash>` |
+| running an unbuilt source tree | `1.0.0+dev` |
+
+The deb uses the Debian spelling so `apt` orders versions like PEP 440 does: `1.0.0a1` becomes
+`1.0.0~a1` (sorts before `1.0.0`), `1.0.0.post1` becomes `1.0.0+post1`. To release: edit
+`VERSION`, commit, `git tag v<VERSION>`, push. CI checks that the tag matches `VERSION`, and
+`a`/`b`/`rc`/`dev` tags are marked as pre-releases on the GitHub release.
+
 ## Offline decode (cortrace-decode)
 
 Run the full pipeline on a deframed ETMv4 byte stream and report quality

@@ -65,3 +65,14 @@ def test_the_notes_and_runs_outputs_are_still_offered(help_text):
     """fuse depends on these two outputs; their names are part of the contract."""
     for flag in ("--itm-note-out", "--nx-runs-out", "--itm-note-unwrap"):
         assert flag in help_text
+
+
+def test_version_flag_reports_the_version_file():
+    """cortrace-decode --version is the VERSION file, optionally with a +local build label."""
+    out = subprocess.run(
+        [BINARY, "--version"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    version_file = os.path.join(os.path.dirname(__file__), "..", "..", "VERSION")
+    with open(version_file, encoding="utf-8") as f:
+        want = f.read().strip()
+    assert out == want or out.startswith(want + "+"), f"{out!r} vs VERSION {want!r}"

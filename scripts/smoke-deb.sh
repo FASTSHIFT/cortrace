@@ -8,7 +8,9 @@
 set -euo pipefail
 DEB="$(readlink -f "${1:?usage: $0 cortrace.deb [expected-version]}")"
 IMAGE="${CORTRACE_DEB_IMAGE:-ubuntu:22.04}"
-WANT="${2:-$(dpkg-deb -f "$DEB" Version)}"
+# The tools print the PEP 440 version (1.0.0a1); the package carries the Debian
+# form (1.0.0~a1). Map it back unless the caller says what to expect.
+WANT="${2:-$(dpkg-deb -f "$DEB" Version | sed -E 's/~~dev/.dev/; s/~dev/.dev/; s/~(a|b|rc)/\1/; s/\+post/.post/')}"
 
 docker run --rm -v "$DEB":/pkg/cortrace.deb:ro -e WANT="$WANT" "$IMAGE" bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
@@ -20,7 +22,7 @@ docker run --rm -v "$DEB":/pkg/cortrace.deb:ro -e WANT="$WANT" "$IMAGE" bash -eu
     echo "== versions"
     [ "$(run cortrace version)" = "cortrace $WANT" ]
     run cortrace --help | grep -qE "^ +serve "
-    run cortrace-decode --version
+    [ "$(run cortrace-decode --version)" = "$WANT" ]
     run "cortrace-grab 2>&1 | grep -q usage"
 
     echo "== no missing shared libraries"

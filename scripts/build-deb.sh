@@ -5,15 +5,16 @@
 #
 #   scripts/build-deb.sh [out-dir]      default out-dir: ./dist
 #
-# The version comes from the git tag (see cmake/Packaging.cmake); pass
-# CORTRACE_VERSION=1.2.3 in the environment to override it.
+# The version is the VERSION file (see cmake/Version.cmake): exactly VERSION when
+# HEAD is the v<VERSION> tag, otherwise VERSION+git<N>.<hash>. Pass
+# CORTRACE_VERSION=1.0.0a1 in the environment to override it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$(mkdir -p "${1:-$ROOT/dist}" && cd "${1:-$ROOT/dist}" && pwd)"
 IMAGE="${CORTRACE_DEB_IMAGE:-ubuntu:22.04}"
 
 # git inside the container refuses a repo owned by another uid; the build only
-# reads it (for `git describe`), so mark it safe there.
+# reads it (to see whether HEAD is the release tag), so mark it safe there.
 docker run --rm \
     -v "$ROOT":/src:ro -v "$OUT":/out \
     -e CORTRACE_VERSION="${CORTRACE_VERSION:-}" \

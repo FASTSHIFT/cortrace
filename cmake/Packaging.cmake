@@ -11,52 +11,8 @@
 #   cmake -S . -B build-deb -DCMAKE_BUILD_TYPE=Release -DCORTRACE_OPENCSD_STATIC=ON
 #   cmake --build build-deb -j && (cd build-deb && cpack -G DEB)
 
-# ---- version: from the latest vX.Y.Z git tag --------------------------------
-# Tagged commit v0.2.0           -> 0.2.0
-# 5 commits after v0.2.0         -> 0.2.0+git5.abc1234
-# no tag yet                     -> 0.0.0+git<commit count>.abc1234
-# -DCORTRACE_VERSION=1.2.3 overrides (CI passes the tag name).
-set(CORTRACE_VERSION "" CACHE STRING "Package version override, e.g. 0.2.0")
-if(NOT CORTRACE_VERSION)
-    find_package(Git QUIET)
-    set(_ct_ver "0.0.0+dev")
-    if(GIT_FOUND)
-        execute_process(
-            COMMAND ${GIT_EXECUTABLE} describe --tags --long --match "v[0-9]*"
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            OUTPUT_VARIABLE _ct_desc
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET)
-        if(_ct_desc MATCHES "^v([0-9][0-9.]*)-([0-9]+)-g([0-9a-f]+)$")
-            if(CMAKE_MATCH_2 EQUAL 0)
-                set(_ct_ver "${CMAKE_MATCH_1}")
-            else()
-                set(_ct_ver "${CMAKE_MATCH_1}+git${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
-            endif()
-        else()
-            execute_process(
-                COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                OUTPUT_VARIABLE _ct_count
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET)
-            execute_process(
-                COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                OUTPUT_VARIABLE _ct_hash
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET)
-            if(_ct_count AND _ct_hash)
-                set(_ct_ver "0.0.0+git${_ct_count}.${_ct_hash}")
-            endif()
-        endif()
-    endif()
-    set(CORTRACE_VERSION "${_ct_ver}")
-endif()
-message(STATUS "cortrace version: ${CORTRACE_VERSION}")
-
-# The Python package reports this version (cortrace/__init__.py imports it).
-file(WRITE ${CMAKE_BINARY_DIR}/_version.py "__version__ = \"${CORTRACE_VERSION}\"\n")
+# The version (CORTRACE_VERSION, CORTRACE_DEB_VERSION, _version.py) comes from
+# cmake/Version.cmake, which reads the VERSION file at the repository root.
 
 # ---- install ------------------------------------------------------------------
 install(TARGETS cortrace-grab RUNTIME DESTINATION bin)
@@ -82,7 +38,7 @@ endif()
 # ---- CPack: .deb --------------------------------------------------------------
 set(CPACK_GENERATOR DEB)
 set(CPACK_PACKAGE_NAME cortrace)
-set(CPACK_PACKAGE_VERSION "${CORTRACE_VERSION}")
+set(CPACK_PACKAGE_VERSION "${CORTRACE_DEB_VERSION}")
 set(CPACK_PACKAGE_CONTACT "VIFEX <vifextech@foxmail.com>")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
     "Cortex-M parallel trace (ETM/DWT/ITM) decoder, FPGA capture and Perfetto tools")

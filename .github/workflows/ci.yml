@@ -87,7 +87,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0 # the version comes from `git describe` on the v* tags
+          fetch-depth: 0 # tags are needed to tell a release from a dev build
+
+      - name: A release tag must match the VERSION file (v<VERSION>)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: test "${GITHUB_REF_NAME}" = "v$(cat VERSION)"
 
       - name: Build the package (in an ubuntu:22.04 container)
         run: bash scripts/build-deb.sh dist
@@ -123,3 +127,5 @@ jobs:
         with:
           files: dist/cortrace_*.deb
           generate_release_notes: true
+          # v1.0.0a1 / b1 / rc1 / .dev1 are marked as pre-releases
+          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'dev') }}

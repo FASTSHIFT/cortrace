@@ -74,6 +74,22 @@ scripts/smoke-deb.sh dist/cortrace_*.deb        # 干净容器 + 普通用户的
 
 推送 `v*` tag 时，CI 会构建 deb、跑冒烟测试，并把它挂到对应的 GitHub Release。
 
+### 版本号
+
+唯一来源是仓库根目录的 `VERSION` 文件（第一版是 `1.0.0`），格式为 [PEP 440](https://peps.python.org/pep-0440/) 的子集：
+`主.次.补丁`，可加后缀 `aN`/`bN`/`rcN`（预发布）、`.postN`、`.devN`，例如
+`1.0.0`、`1.0.0a1`、`1.0.0rc1`、`1.0.0.post1`、`1.0.0.dev3`。
+
+| 构建 | `cortrace version` / `cortrace-decode --version` |
+|------|--------------------------------------------------|
+| HEAD 正好是 `v<VERSION>` tag（发布） | `1.0.0` |
+| 其他提交（开发构建） | `1.0.0+git<提交数>.<哈希>` |
+| 未构建的源码目录直接运行 | `1.0.0+dev` |
+
+deb 里用 Debian 写法，保证 `apt` 的排序与 PEP 440 一致：`1.0.0a1` → `1.0.0~a1`（排在 `1.0.0` 之前），
+`1.0.0.post1` → `1.0.0+post1`。发布步骤：改 `VERSION` → 提交 → `git tag v<VERSION>` → 推送；
+CI 会校验 tag 与 `VERSION` 一致，`a`/`b`/`rc`/`dev` 的 tag 在 GitHub Release 上标为预发布。
+
 ## 离线解码（cortrace-decode）
 
 在已 deframe 的 ETMv4 字节流上跑完整链路，报告质量指标（配平、调用边）。
