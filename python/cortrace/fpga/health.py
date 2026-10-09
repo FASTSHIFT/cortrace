@@ -1,8 +1,15 @@
-"""health — one-shot FPGA observability readout (proposal 30 P1).
+"""health — one-shot FPGA observability readout.
 
 Reads the dbg_regfile in trace_mmcm_stream_top over the :5001 readout path
 (which is independent of the self-TX data stream, so it works even when the
 trace stream is deadlocked) and prints a human-readable health diagnosis.
+
+How to read the result: the FPGA only sees a trace clock while the target is
+actually producing trace. Right after (re)loading the bitstream, or whenever
+the target's trace unit is not enabled, TRACECLK is absent and that is an
+idle state, not a fault. The error register is sticky (it keeps the first
+error since the bitstream was loaded or last reset), so a latched error is a
+warning unless you pass --reset, which clears it first.
 
 The readout protocol (fpga_core_net ext_addr/ext_data, port 5001):
   request  = <u16 base LE> + padding
@@ -15,6 +22,7 @@ Usage: cortrace fpga health [ip] [--check {health,ddr3,blackbox}] [--reset]
 """
 
 import argparse
+import datetime
 import socket
 import struct
 import time
@@ -26,8 +34,8 @@ REG_SOFTRST = 0x10  # CSR: soft-reset the trace capture path (MMCM/FIFO/debug)
 
 
 def soft_reset(ip):
-    """Trigger the FPGA trace-path soft reset via :5002 (proposal 30). Recovers
-    a stuck capture MMCM / clears sticky debug counters without a power cycle."""
+    """Trigger the FPGA trace-path soft reset via :5002. Recovers a stuck
+    capture MMCM / clears sticky debug counters without a power cycle."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(1.0)
     s.sendto(bytes([REG_SOFTRST, 1, 0, 0]), (ip, CTRL_PORT))
@@ -51,7 +59,7 @@ A_GPIO_LEVEL = 0xFF30  # {0,0,0,clk,d3,d2,d1,d0}
 A_GPIO_EDGES = 0xFF31  # clk(2) d0(2) d1(2) d2(2) d3(2) LE, 10 bytes
 A_FREQ = 0xFF3B  # TRACECLK edges per 16.777ms window, 3 bytes LE
 A_GAP = 0xFF3E  # gap_count(2) gap_max(2) LE
-# DDR3 self-test status page (proposal 32 P2a), in trace_ddr_selftest_top
+# DDR3 self-test status page, in trace_ddr_selftest_top
 A_DDR3_MAGIC = 0xFF50  # 0xD3
 A_DDR3_FLAGS = 0xFF51  # {..., err_sticky, calib_done}
 A_DDR3_ERRC = 0xFF52  # 4 bytes LE  (compare error count)
@@ -62,7 +70,89 @@ A_DDR3_EXPLO = 0xFF5D  # expected byte[0] at first mismatch
 A_DDR3_GOTLO = 0xFF5E  # actual   byte[0] at first mismatch
 A_DDR3_EXPHI = 0xFF5F  # expected byte[15:14] (2 bytes LE)
 A_DDR3_GOTHI = 0xFF61  # actual   byte[15:14] (2 bytes LE)
-A_BUILD_ID = 0xFF70  # 4 bytes LE — Unix epoch stamped at synth (build identity)
+A_BUILD_ID = 0xFF70  # 4 bytes LE — Unix epoch stamped at synth (= build time)
+A_VERSION = 0xFF74  # patch, minor, major, flags (VERSION file of cortrace-fpga)
+A_GIT = 0xFF78  # 4 bytes LE — first 8 hex digits of the git commit
+A_FEATURES = 0xFF7C  # bitmap of what this bitstream implements
+A_ID_MARK = 0xFF7E  # 0xFA when the version block below is present
+ID_MARK = 0xFA
+A_RING_MAGIC = 0xFF50  # 0xD1 on the DDR-ring capture design
+FEATURE_NAMES = {
+    0: "pin monitors",  # TRACECLK activity / pin edges / frequency / gaps
+    1: "DDR3 ring",
+    2: "stream self-test",
+    3: "run-time port width",
+}
+FLAG_DIRTY, FLAG_PRERELEASE, FLAG_UNTAGGED = 1, 2, 4
+EARLIEST_BUILD = 1_577_836_800  # 2020-01-01; anything older is not a real stamp
+HDL_DEFAULT_BUILD = 0xDEADBEEF  # BUILD_ID parameter default when nothing stamped it
+
+
+def build_time_text(build_id):
+    """Local time of the synthesis, or None when the register holds no stamp
+    (never stamped, the HDL default, or all-ones)."""
+    if not EARLIEST_BUILD <= build_id < 0xFFFFFFF0 or build_id == HDL_DEFAULT_BUILD:
+        return None
+    return (
+        datetime.datetime.fromtimestamp(build_id)
+        .astimezone()
+        .strftime("%Y-%m-%d %H:%M:%S %z")
+    )
+
+
+class Identity:  # pylint: disable=too-few-public-methods
+    """What the bitstream says about itself, read over the :5001 UDP path
+    (no JTAG involved), plus what the host infers for older bitstreams."""
+
+    def __init__(self, s):
+        def le(base, n):
+            return int.from_bytes(rd(s, base, n), "little")
+
+        self.build_id = le(A_BUILD_ID, 4)
+        self.build_time = build_time_text(self.build_id)
+        self.has_version = rd8(s, A_ID_MARK) == ID_MARK
+        self.version = self.git = self.flags = self.features = None
+        if self.has_version:
+            patch, minor, major, self.flags = rd(s, A_VERSION, 4)
+            self.version = f"{major}.{minor}.{patch}"
+            self.git = f"{le(A_GIT, 4):08x}"
+            self.features = rd8(s, A_FEATURES)
+        ring_design = rd8(s, A_RING_MAGIC) == 0xD1
+        if self.features is None:
+            # Older DDR-ring bitstreams tie the pin monitors off to constant 0.
+            self.pin_monitors = not ring_design
+            self.ddr_ring = ring_design
+        else:
+            self.pin_monitors = bool(self.features & 1)
+            self.ddr_ring = bool(self.features & 2)
+
+    def describe(self):
+        """Lines for the report."""
+        if not self.has_version:
+            first = (
+                "FPGA design : no version register (bitstream predates it; "
+                "rebuild the FPGA to get one)"
+            )
+        else:
+            notes = []
+            if self.flags & FLAG_DIRTY:
+                notes.append("built from a modified tree")
+            if self.flags & FLAG_PRERELEASE:
+                notes.append("pre-release")
+            if self.flags & FLAG_UNTAGGED:
+                notes.append("not a release tag")
+            extra = f", {', '.join(notes)}" if notes else ""
+            first = f"FPGA design : v{self.version} (git {self.git}{extra})"
+        built = self.build_time or "unknown"
+        lines = [f"       {first}", f"       built {built}  (BUILD_ID={self.build_id})"]
+        if self.features is not None:
+            names = [n for bit, n in FEATURE_NAMES.items() if self.features >> bit & 1]
+            lines.append(f"       features: {', '.join(names) or 'none'}")
+
+        lines.append("       (read over the UDP readout port :5001, not JTAG)")
+        return lines
+
+
 FREQ_WINDOW_S = (1 << 21) / 125e6  # 16.777 ms
 CLK_NS = 8.0  # clk125 period (ns)
 
@@ -70,7 +160,7 @@ ERR_NAMES = {
     0x0000: "none",
     0x0101: "no TRACECLK edges (GPIO/trace clock absent)",
     0x0102: "trace MMCM lost lock (wrong TRACECLK freq / dropout)",
-    0x0301: "capture FIFO overflow (ETM trace rate > drain)",
+    0x0301: "capture FIFO overflow (trace data rate > drain)",
     0x0401: "self-TX HDR stuck (ARP not resolved — network self-TX deadlock)",
     0x0501: "MAC RX bad frame",
     0x0502: "MAC TX FIFO overflow",
@@ -105,7 +195,7 @@ def rd8(s, addr):
 
 def ddr3_check(ip):
     """Read the DDR3 self-test status page (0xFF5x) from trace_ddr_selftest_top
-    (proposal 32 P2a) and report calib / compare-error / pass-burst state."""
+    and report calib / compare-error / pass-burst state."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(2.0)
     global IP  # pylint: disable=global-statement
@@ -134,13 +224,7 @@ def ddr3_check(ip):
     state = rd8(s, A_DDR3_STATE) & 0x3
     st_name = {0: "ARBIT", 1: "WRITE", 2: "READ"}.get(state, state)
     build_id = rd_le(A_BUILD_ID, 4)
-    import datetime
-
-    bstr = (
-        datetime.datetime.fromtimestamp(build_id).strftime("%Y-%m-%d %H:%M:%S")
-        if 0 < build_id < 0xFFFFFFF0
-        else "??"
-    )
+    bstr = build_time_text(build_id) or "??"
     print("[OK]   DDR3 status page online (magic=0xD3)")
     print(
         f"       BUILD_ID = {build_id} ({bstr})  <- verify this matches the "
@@ -191,8 +275,8 @@ def ddr3_check(ip):
 
 def blackbox_check(ip):
     """Read the trace black-box writer status page (0xFF5x, magic 0xB0) from
-    trace_ddr_blackbox_top (proposal 32 P2b-1): calib, TRACECLK activity,
-    words written to the DDR3 ring, write pointer, and capture-side loss."""
+    trace_ddr_blackbox_top: calib, TRACECLK activity, words written to the
+    DDR3 ring, write pointer, and capture-side loss."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(2.0)
     global IP  # pylint: disable=global-statement
@@ -212,14 +296,8 @@ def blackbox_check(ip):
     def rd_le(base, n):
         return int.from_bytes(rd(s, base, n), "little")
 
-    build_id = rd_le(0xFF70, 4)
-    import datetime
-
-    bstr = (
-        datetime.datetime.fromtimestamp(build_id).strftime("%Y-%m-%d %H:%M:%S")
-        if 0 < build_id < 0xFFFFFFF0
-        else "??"
-    )
+    build_id = rd_le(A_BUILD_ID, 4)
+    bstr = build_time_text(build_id) or "??"
     flags = rd8(s, 0xFF51)
     calib = flags & 1
     mig_calib = (flags >> 1) & 1
@@ -241,8 +319,8 @@ def blackbox_check(ip):
         return 2
     if not tck_active:
         print(
-            "[WARN] no TRACECLK activity — configure the STM32 ETM so trace "
-            "bytes flow into the black box"
+            "[WARN] no TRACECLK activity — enable the target's trace output "
+            "so trace bytes flow into the black box"
         )
         return 0
     if lost:
@@ -326,12 +404,15 @@ def health_check(
     if magic != 0xDB:
         print(
             f"[WARN] debug regfile magic = 0x{magic:02x} (expected 0xDB). "
-            f"Old bitstream without proposal-30 observability? Falling back."
+            f"Old bitstream without the debug register file? Falling back."
         )
         # still try the legacy lost_cnt/lock readout
         return 0
 
     print(f"[OK]   debug regfile online (magic=0x{magic:02x} v1)")
+    ident = Identity(s)
+    for line in ident.describe():
+        print(line)
 
     live = rd8(s, A_LIVE)
     have_first = (live >> 7) & 1
@@ -351,21 +432,45 @@ def health_check(
     first_ctx = rd8(s, A_FIRST_CTX)
 
     # ---- live state ----
-    print(
-        f"       sys MMCM lock={sys_lock}  trace MMCM lock={trace_lock}  "
-        f"TRACECLK active={traceclk_active}"
-    )
+    if ident.pin_monitors:
+        print(
+            f"       sys MMCM lock={sys_lock}  trace MMCM lock={trace_lock}  "
+            f"TRACECLK active={traceclk_active}"
+        )
+    else:
+        print(f"       sys MMCM lock={sys_lock}  DDR3 calibrated={trace_lock}")
     print(f"       self-TX FSM = {FSM_NAMES.get(fsm, fsm)}  pkt_active={pkt_active}")
     if not sys_lock:
         print("[FAIL] system MMCM not locked — FPGA clocking broken")
-    if not traceclk_active:
-        print("[WARN] no TRACECLK activity — ETM not configured / no trace clock")
+    if not ident.pin_monitors:
+        if ident.ddr_ring and not trace_lock:
+            print("[WARN] DDR3 not calibrated — power-cycle the board")
+    elif not traceclk_active:
+        print(
+            "[INFO] no TRACECLK activity — the target is not producing trace "
+            "right now (normal when idle, e.g. right after loading the bitstream)"
+        )
     elif not trace_lock:
         print("[WARN] trace MMCM not locked despite TRACECLK — wrong sampling freq")
     else:
         print("[OK]   TRACECLK active + trace MMCM locked")
 
-    # ---- raw GPIO monitor (cross-check pin activity vs decode) ----
+    if ident.pin_monitors:
+        pin_monitor_report(s, traceclk_active, trace_lock)
+    else:
+        print(
+            "[INFO] this bitstream does not expose TRACECLK / pin monitors "
+            "(those registers are tied to 0), so nothing is concluded about "
+            "the trace clock. LED0 shows TRACECLK activity; judge capture "
+            "quality by the decode summary (`stream health ... clean`)."
+        )
+    return report_counters_and_errors(
+        s, reset, have_first, first_code, first_time, first_ctx
+    )
+
+
+def pin_monitor_report(s, traceclk_active, trace_lock):
+    """TRACECLK / pin monitors; only meaningful if the bitstream wires them."""
     glevel = rd8(s, A_GPIO_LEVEL)
     ge = rd(s, A_GPIO_EDGES, 10)
     gclk_ed = ge[0] | (ge[1] << 8)
@@ -390,37 +495,36 @@ def health_check(
         f"       TRACECLK freq meter: {freq_edges} edges/16.78ms "
         f"=> ~{f_mhz:.2f} MHz at the pin"
     )
-    # TRACECLK gap detector: gaps => the H7 TPIU stopping the clock between
-    # bursts, which makes the capture MMCM lose lock (flapping).
+    # TRACECLK gap detector. With no clock at all the counter just saturates
+    # (count=1, longest=65535), which says nothing about gaps, so gaps are only
+    # interpreted while a clock is actually present.
     gb = rd(s, A_GAP, 4)
     gap_count = gb[0] | (gb[1] << 8)
     gap_max = gb[2] | (gb[3] << 8)
     gc = ">=65535" if gap_count == 0xFFFF else str(gap_count)
     gm_ns = gap_max * CLK_NS
     print(f"       TRACECLK gaps: count={gc}  longest={gap_max} clk ({gm_ns:.0f} ns)")
-    if gap_count > 0:
+    clock_seen = bool(traceclk_active or freq_edges or gclk_ed)
+    if not clock_seen:
         print(
-            f"[FAIL] TRACECLK is DISCONTINUOUS ({gc} gaps, up to {gm_ns:.0f} ns): "
-            f"the H7 TPIU stops the clock between trace bursts. The capture "
-            f"MMCM loses lock on every gap (flapping) -> sample errors. This is "
-            f"the root cause of the ~7-9% unknown, NOT a frequency mismatch."
+            "[INFO] pins are quiet (no TRACECLK, no data edges): nothing is "
+            "reaching the FPGA GPIO yet. Enable the target's trace output and "
+            "read again; if it stays quiet with trace enabled, check the trace "
+            "pin configuration and wiring."
         )
+    elif gap_count > 0:
         print(
-            "       => fix options: (a) keep TRACECLK continuous (TPIU "
-            "continuous formatting / periodic sync), or (b) use a "
-            "gap-tolerant capture front-end that re-locks fast / free-runs."
+            f"[WARN] TRACECLK has gaps ({gc} gaps, up to {gm_ns:.0f} ns): some "
+            f"targets stop the trace clock while idle. The capture front-end "
+            f"re-locks after each gap; only treat this as a problem if the "
+            f"capture shows sample errors."
         )
-    if gclk_ed == 0 and all(x == 0 for x in gd_ed):
+    if clock_seen and gclk_ed == 0:
         print(
-            "[FAIL] raw trace pins are STATIC — no signal reaching the FPGA "
-            "GPIO (check STM32 ETM pins / wiring / DAP config)"
+            "[WARN] TRACECLK pin not toggling but data lanes are — check the "
+            "trace clock output pin / wiring"
         )
-    elif gclk_ed == 0:
-        print(
-            "[WARN] TRACECLK pin not toggling but data lanes are — trace clock "
-            "output / PE2 wiring problem"
-        )
-    else:
+    elif clock_seen:
         active_lanes = [i for i, x in enumerate(gd_ed) if x > 0]
         print(
             f"[OK]   raw GPIO toggling: TRACECLK + TRACED lanes {active_lanes} "
@@ -433,6 +537,11 @@ def health_check(
                 "'no signal' issue. Cross-check confirms the GPIO side is fine."
             )
 
+
+def report_counters_and_errors(
+    s, reset, have_first, first_code, first_time, first_ctx
+):  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    """Per-source error counters and the sticky first error; returns the exit code."""
     # ---- counters ----
     cnts = rd(s, A_CNT_BASE, len(CNT_NAMES))
     nonzero = [(CNT_NAMES[i], cnts[i]) for i in range(len(CNT_NAMES)) if cnts[i]]
@@ -448,28 +557,40 @@ def health_check(
         t_ms = first_time / 125_000.0
         ctx_fsm = first_ctx & 0x3
         name = ERR_NAMES.get(first_code, f"unknown 0x{first_code:04x}")
-        print(f"[FAIL] FIRST_ERR = 0x{first_code:04x} ({name})")
+        # The register is sticky: it holds the FIRST error since the bitstream
+        # was loaded or the last reset, so on its own it says nothing about the
+        # present. Only after --reset (which clears it) is a latched error fresh.
+        tag = "[FAIL]" if reset else "[WARN]"
+        print(f"{tag} FIRST_ERR = 0x{first_code:04x} ({name})")
         print(
             f"       @ t={t_ms:.2f} ms (cyc={first_time}), "
             f"self-TX was in {FSM_NAMES.get(ctx_fsm, ctx_fsm)}"
         )
+        if not reset:
+            print(
+                "       sticky since the bitstream was loaded or last reset; it "
+                "may predate the current state. Run `cortrace fpga health "
+                "--reset`, start tracing, then run it again: if it does not "
+                "come back, the capture path is fine."
+            )
         # targeted advice
         if first_code == 0x0401:
             print(
-                "       => self-TX/ARP deadlock (HANDOFF §7.1). The self-TX FSM "
-                "waited >8ms for ARP resolve. Host must answer the FPGA's ARP, "
-                "or the FSM needs the deadlock fix."
+                "       => self-TX could not resolve the host via ARP for >8 ms. "
+                "The host NIC must hold the address the FPGA streams to and "
+                "answer its ARP."
             )
         elif first_code == 0x0301:
             print(
-                "       => ETM trace rate exceeds the 4-bit@TRACECLK drain "
-                "(proposal 29). Lower CPU clock or raise TRACECLK."
+                "       => trace data rate exceeded what the capture path could "
+                "drain. Reduce the target's trace output rate (fewer trace "
+                "sources, lower core clock) or raise the trace clock."
             )
         elif first_code in (0x0101, 0x0102):
             print(
-                "       => check STM32 ETM config / TRACECLK freq vs FPGA "
-                "MMCM sampling frequency."
+                "       => check the target's trace configuration and that the "
+                "TRACECLK frequency matches what the FPGA samples at."
             )
-        return 2
+        return 2 if reset else 0
     print("[OK]   no sticky errors latched — link healthy")
     return 0

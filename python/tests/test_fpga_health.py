@@ -41,26 +41,37 @@ def test_healthy_link(board, capsys):
     )
 
 
-def test_sticky_error_is_reported_with_advice(board, capsys):
+def test_sticky_error_is_only_a_warning_without_reset(board, capsys):
     mem, _ = board
     healthy(mem)
     put(mem, health.A_LIVE, 0b1111_1010)  # have_first
     put(mem, health.A_FIRST_CODE, 0x0401, 2)
     put(mem, health.A_FIRST_TIME, 125_000, 4)
-    assert run() == 2
+    assert run() == 0
     out = capsys.readouterr().out
-    assert "FIRST_ERR = 0x0401" in out and "ARP deadlock" in out
+    assert "[WARN] FIRST_ERR = 0x0401" in out and "ARP" in out
+    assert "may predate the current state" in out and "[FAIL]" not in out
+
+
+def test_sticky_error_after_reset_is_a_failure(board, capsys):
+    mem, _ = board
+    healthy(mem)
+    put(mem, health.A_LIVE, 0b1111_1010)
+    put(mem, health.A_FIRST_CODE, 0x0401, 2)
+    assert run("--reset") == 2
+    out = capsys.readouterr().out
+    assert "[FAIL] FIRST_ERR = 0x0401" in out and "may predate" not in out
 
 
 @pytest.mark.parametrize(
-    "code,text", [(0x0301, "drain"), (0x0101, "check STM32 ETM config")]
+    "code,text", [(0x0301, "drain"), (0x0101, "trace configuration")]
 )
 def test_other_error_codes_get_their_advice(board, capsys, code, text):
     mem, _ = board
     healthy(mem)
     put(mem, health.A_LIVE, 0b1111_1010)
     put(mem, health.A_FIRST_CODE, code, 2)
-    assert run() == 2
+    assert run("--reset") == 2
     assert text in capsys.readouterr().out
 
 
@@ -74,6 +85,90 @@ def test_clock_trouble_is_called_out(board, capsys):
     put(mem, health.A_LIVE, 0b0010_1010)  # TRACECLK but trace MMCM unlocked
     assert run() == 0
     assert "trace MMCM not locked" in capsys.readouterr().out
+
+
+def test_idle_target_is_not_reported_as_a_fault(board, capsys):
+    """Fresh bitstream, target not tracing: no clock, saturated gap counter."""
+    mem, _ = board
+    put(mem, health.A_MAGIC, 0xDB)
+    put(mem, health.A_LIVE, 0b0000_1010)  # sys lock, no TRACECLK
+    put(mem, health.A_GAP, 1, 2)
+    put(mem, health.A_GAP + 2, 0xFFFF, 2)
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert "[FAIL]" not in out and "DISCONTINUOUS" not in out
+    assert "pins are quiet" in out and "STM32" not in out and "H7" not in out
+
+
+def stamp(mem, features=0b1110, flags=0b101, build_id=1_791_000_000):
+    put(mem, health.A_ID_MARK, health.ID_MARK)
+    for i, byte in enumerate((3, 2, 1, flags)):  # patch, minor, major, flags
+        mem[health.A_VERSION + i] = byte
+    put(mem, health.A_GIT, 0x1A2B3C4D, 4)
+    put(mem, health.A_FEATURES, features)
+    put(mem, health.A_BUILD_ID, build_id, 4)
+
+
+def test_fpga_version_and_build_time_are_printed(board, capsys):
+    mem, _ = board
+    healthy(mem)
+    stamp(mem)
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert "FPGA design : v1.2.3 (git 1a2b3c4d, built from a modified tree" in out
+    assert "not a release tag" in out and "pre-release" not in out
+    assert "built 2026-" in out and "BUILD_ID=1791000000" in out
+    assert "features: DDR3 ring, stream self-test, run-time port width" in out
+    assert "not JTAG" in out
+
+
+def test_bitstream_without_pin_monitors_is_not_judged_on_them(board, capsys):
+    """The DDR-ring bitstream ties TRACECLK/GPIO/gap monitors to constants."""
+    mem, _ = board
+    put(mem, health.A_MAGIC, 0xDB)
+    put(mem, health.A_LIVE, 0b0001_1010)  # sys lock, DDR3 calibrated, no TRACECLK
+    put(mem, health.A_GAP, 1, 2)
+    put(mem, health.A_GAP + 2, 0xFFFF, 2)
+    stamp(mem)
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert "does not expose TRACECLK / pin monitors" in out
+    assert "DDR3 calibrated=1" in out
+    for word in ("[FAIL]", "gaps", "STATIC", "raw GPIO", "no TRACECLK"):
+        assert word not in out
+
+
+def test_legacy_ring_bitstream_is_recognised_without_a_version_block(board, capsys):
+    mem, _ = board
+    put(mem, health.A_MAGIC, 0xDB)
+    put(mem, health.A_LIVE, 0b0000_1010)  # DDR3 not calibrated
+    put(mem, health.A_RING_MAGIC, 0xD1)
+    put(mem, health.A_BUILD_ID, 1_791_000_000, 4)
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert "no version register" in out and "built 2026-" in out
+    assert "does not expose TRACECLK / pin monitors" in out
+    assert "DDR3 not calibrated" in out
+
+
+def test_unstamped_build_id_is_reported_as_unknown(board, capsys):
+    mem, _ = board
+    healthy(mem)
+    put(mem, health.A_BUILD_ID, 0xDEADBEEF, 4)  # the HDL default
+    assert run() == 0
+    assert "built unknown" in capsys.readouterr().out
+
+
+def test_gaps_while_the_clock_runs_are_a_warning(board, capsys):
+    mem, _ = board
+    healthy(mem)
+    put(mem, health.A_FREQ, 2_000_000, 3)
+    put(mem, health.A_GPIO_EDGES, 500, 2)  # TRACECLK edges seen at the pin
+    put(mem, health.A_GAP, 3, 2)
+    put(mem, health.A_GAP + 2, 100, 2)
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert "[WARN] TRACECLK has gaps (3 gaps" in out and "[FAIL]" not in out
 
 
 def test_wrong_magic_warns(board, capsys):
