@@ -215,6 +215,17 @@ cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out tcbmap.txt
 它只读 `g_pidhash` 里的活条目（只读内存），并且借用已经常驻的 OpenOCD 会话，不会另起一个 OpenOCD
 去连调试器——后者会把 DWT 配置清掉。
 
+没有常驻 OpenOCD 时才需要自己指定调试器和芯片的配置文件（工具不内置任何型号）：
+`--openocd-config interface/<probe>.cfg --openocd-config target/<chip>.cfg`，或设环境变量
+`CORTRACE_OPENOCD_CONFIG="interface/<probe>.cfg target/<chip>.cfg"`。
+
+### 适配别的内核（ETMv4 参数）
+
+`cortrace-decode` 的 ETMv4 参数默认按 Cortex-M7 的 ETMv4 配置。换成别的核时，从目标的
+`TRCIDR0/1/2/8/12`、`TRCCONFIGR`、`TRCTRACEIDR` 读出值，用
+`--etm-idr0/1/2/8/12`、`--etm-configr`、`--etm-trace-id` 覆盖（`--etm-trace-id` 改了的话，
+`--want-stream` 也要跟着改成同一个 ATB id）。
+
 ### 4.2 软硬融合模式：硬件 + NuttX 软件 trace
 
 **目标侧**：固件打开 `CONFIG_ARMV7M_NOTE_ITM`（note 走 ITM 刺激端口 1，和 ETM、DWT 共用同一个 TPIU）。
@@ -279,7 +290,26 @@ cortrace fuse --raw raw_demo.bin --elf nuttx --out-dir ~/traces --tag again --tc
 - 也可以直接把 `.perfetto` 文件拖进 https://ui.perfetto.dev 。
 - 融合文件里，硬件轨道（调用栈、`Threads` 线程泳道）和软件轨道（调度、线程）在同一条时间轴上，可以直接对照。
 
-### 4.4 其他命令
+### 4.4 查看 FPGA 版本
+
+`cortrace fpga health` 开头会打印 FPGA 比特流的身份：
+
+```
+FPGA design : v1.0.0 (git 1a2b3c4d)
+built 2026-10-09 21:30:12 +0800  (BUILD_ID=1791552612)
+features: DDR3 ring, stream self-test, run-time port width
+(read over the UDP readout port :5001, not JTAG)
+```
+
+- 这些值是综合时写进比特流的常量（版本号来自 `cortrace-fpga/VERSION`，加 git 提交和编译时间），
+  FPGA 运行时通过 UDP :5001 读出，**不走 JTAG**，也不占采集带宽。
+- `built from a modified tree` 表示综合时工作区有未提交的改动；`not a release tag` 表示当时的 HEAD
+  不是 `v<VERSION>` tag；`pre-release` 表示 VERSION 带后缀。
+- `features` 告诉主机这个比特流实现了什么。比如没有 `pin monitors` 的比特流，`health` 就不会去解读
+  TRACECLK / 引脚寄存器（它们是接地的常量），以前会因此误报。
+- 旧比特流显示 `no version register`，重新综合（`fpga_flow/build_trace_stream.tcl`）后就有了。
+
+### 4.5 其他命令
 
 | 命令 | 作用 |
 |------|------|
@@ -382,7 +412,7 @@ flowchart TD
 | `nxtrace not found` | 没装 pynuttx 且没指定：`pip install` 它，或 `--pynuttx DIR` / `export PYNUTTX=…` |
 | `no note bytes on ITM port 1` | 固件没开 `CONFIG_ARMV7M_NOTE_ITM`，或 ITM 没使能（调试器没武装） |
 | `clock alignment failed: no fused file` | 硬件和软件的线程切换序列对不上（丢了 note）。看 `itm notes … OVERFLOW`，降低 note 量后重抓；此时只产出硬件 trace |
-| `cortrace fpga health` 报 TRACECLK 无活动 / DISCONTINUOUS | 这是它读寄存器那一刻目标没在输出 trace 时的诊断，文字里的"根因"推断偏悲观；**抓取质量以解码摘要的 `stream health … clean` 为准** |
+| `cortrace fpga health` 提示没有 TRACECLK / 有 `FIRST_ERR` | 目标没在输出 trace 时（比如刚烧完 bitstream）FPGA 看不到时钟，这是空闲状态，输出里是 `[INFO]` 而不是故障；`FIRST_ERR` 是"自上次加载/复位以来的第一个错误"，不带 `--reset` 时只是 `[WARN]`。想知道现在有没有问题：`cortrace fpga health --reset`，开始 trace，再跑一次，没再出现就说明采集链路没问题。**抓取质量最终以解码摘要的 `stream health … clean` 为准** |
 | 浏览器连不上 / 连上被拒 | 看 `serve` 的日志：`refusing origin` 说明来源不在白名单；端口被占用见第 5 节 |
 | 解码出的 `Threads` 泳道为空 / 没有线程切换 | 调试器的常驻会话退出了，或目标被复位过，DWT 配置没了：重新启动常驻 OpenOCD 会话（它会复位目标并重新武装，日志里能看到 `armed`），再抓 |
 
