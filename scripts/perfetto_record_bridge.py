@@ -409,7 +409,15 @@ def parse_args(argv=None):
     )
     ap.add_argument(
         "--capture-out",
-        default="/tmp/record_bridge_live.perfetto",
+        default=os.path.abspath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..",
+                "..",
+                "perftrace",
+                "record_bridge_live.perfetto",
+            )
+        ),
         help="R1: path the --capture-cmd writes the .perfetto to",
     )
     ap.add_argument("--sock", default=CONSUMER_SOCK, help="UNIX socket path")
