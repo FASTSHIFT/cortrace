@@ -97,6 +97,114 @@ std::vector<DwtEvent> parse_dwt_data_values(
     return out;
 }
 
+std::vector<uint8_t> extract_itm_stimulus(
+    const std::vector<uint8_t>& bytes, uint8_t port, ItmStats* stats)
+{
+    ItmStats st;
+    std::vector<uint8_t> out;
+    const std::size_t n = bytes.size();
+    std::size_t i = 0;
+
+    while (i < n) {
+        const uint8_t hdr = bytes[i];
+        const int size = ss_to_size(hdr);
+        if (size != 0) {
+            if (i + 1 + static_cast<std::size_t>(size) > n) {
+                st.truncated = true;
+                break;
+            }
+            if ((hdr & 0x04) == 0) { // instrumentation (software) packet
+                ++st.sw_packets;
+                if ((hdr >> 3) == port) {
+                    ++st.port_packets;
+                    out.insert(out.end(), bytes.begin() + static_cast<std::ptrdiff_t>(i + 1),
+                        bytes.begin() + static_cast<std::ptrdiff_t>(i + 1 + size));
+                }
+            } else {
+                ++st.hw_packets;
+            }
+            i += 1 + static_cast<std::size_t>(size);
+            continue;
+        }
+        // Protocol packets: walk them so we stay byte-aligned (same rules as
+        // parse_dwt_data_values).
+        if (hdr == 0x00) { // sync / idle zero
+            ++i;
+        } else if (hdr == 0x70) { // overflow (LTS2 with TTT=111 is reserved for it): the
+            // ITM FIFO dropped packets upstream
+            ++st.overflows;
+            ++i;
+        } else if ((hdr & 0x8F) == 0x00) { // LTS2, one byte
+            ++st.timestamps;
+            ++i;
+        } else if ((hdr & 0xCF) == 0xC0) { // LTS1: header + continuation bytes
+            ++st.timestamps;
+            std::size_t j = i + 1;
+            while (j < n && (bytes[j] & 0x80))
+                ++j;
+            if (j < n)
+                ++j;
+            i = j;
+        } else { // extension / other single-byte protocol packet
+            ++st.other;
+            ++i;
+        }
+    }
+    if (stats)
+        *stats = st;
+    return out;
+}
+
+void unwrap_note_systime(std::vector<uint8_t>& s, NoteUnwrapStats* stats)
+{
+    NoteUnwrapStats st;
+    const std::size_t n = s.size();
+    uint64_t epoch = 0;
+    bool have_last = false;
+    uint32_t last = 0;
+    std::size_t i = 0;
+
+    while (i + 16 <= n) {
+        const std::size_t len = s[i];
+        const uint8_t type = s[i + 1];
+        // A frame looks like a note if the length covers the 16-byte header, the
+        // type is in the note enum range, and the high half of the 64-bit systime
+        // is still zero (a raw 32-bit counter value).
+        const bool high_zero = s[i + 12] == 0 && s[i + 13] == 0 && s[i + 14] == 0 && s[i + 15] == 0;
+        if (len < 16 || i + len > n || type > 40 || !high_zero) {
+            ++st.skipped_bytes;
+            ++i;
+            continue;
+        }
+        const uint32_t cur = static_cast<uint32_t>(s[i + 8])
+            | (static_cast<uint32_t>(s[i + 9]) << 8) | (static_cast<uint32_t>(s[i + 10]) << 16)
+            | (static_cast<uint32_t>(s[i + 11]) << 24);
+        uint64_t use_epoch = epoch;
+        if (have_last) {
+            if (cur < last && last - cur > 0x80000000u) {
+                ++epoch; // counter wrapped
+                ++st.wraps;
+                use_epoch = epoch;
+                last = cur;
+            } else if (cur > last && cur - last > 0x80000000u) {
+                use_epoch = epoch - 1; // late note stamped just before the wrap
+            } else {
+                last = cur;
+            }
+        } else {
+            last = cur;
+            have_last = true;
+        }
+        const uint64_t ext = (use_epoch << 32) | cur;
+        for (int b = 0; b < 8; ++b)
+            s[i + 8 + b] = static_cast<uint8_t>((ext >> (8 * b)) & 0xFF);
+        ++st.notes;
+        i += len;
+    }
+    if (stats)
+        *stats = st;
+}
+
 namespace {
     // Default resolver: no target memory / ELF, just format the pointer. The
     // tid is derived from the pointer so the same TCB maps to the same track.

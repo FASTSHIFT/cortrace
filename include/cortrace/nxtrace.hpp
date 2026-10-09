@@ -53,6 +53,42 @@ struct DwtEvent {
 std::vector<DwtEvent> parse_dwt_data_values(
     const std::vector<uint8_t>& bytes, const std::vector<std::size_t>& src_index);
 
+// Counters from walking an ITM/DWT packet stream.
+struct ItmStats {
+    std::size_t sw_packets = 0; // instrumentation (software-source) packets, all ports
+    std::size_t port_packets = 0; // ... of which on the requested port
+    std::size_t hw_packets = 0; // hardware-source (DWT) packets
+    std::size_t timestamps = 0; // local timestamp packets skipped
+    std::size_t overflows = 0; // ITM overflow packets (0x70): the ITM FIFO dropped data
+    std::size_t other = 0; // other protocol bytes skipped
+    bool truncated = false; // stream ended inside a packet
+};
+
+// Software trace over ITM: reassemble the payload bytes of instrumentation
+// packets written to stimulus port `port`, in stream order. A target driver
+// that writes its byte stream (e.g. NuttX scheduler notes, arm_note_itm.c) to
+// one stimulus port as 8/16/32-bit stores thus yields exactly that byte stream
+// here, ready for a host-side parser. Instrumentation packets have header
+// bits[7:3]=port, bit2=0, bits[1:0]=SS (1/2/4 payload bytes); DWT hardware
+// packets (bit2=1) and timestamp/protocol packets are walked over, not copied.
+std::vector<uint8_t> extract_itm_stimulus(
+    const std::vector<uint8_t>& bytes, uint8_t port, ItmStats* stats = nullptr);
+
+// Counters from unwrap_note_systime().
+struct NoteUnwrapStats {
+    std::size_t notes = 0; // notes whose timestamp was extended
+    std::size_t wraps = 0; // 32-bit counter wraps found
+    std::size_t skipped_bytes = 0; // bytes that did not frame as a note (losses / stream start)
+};
+
+// NuttX stamps notes with up_perf_gettime(), which on ARMv7-M is the 32-bit
+// DWT_CYCCNT: at 150 MHz it wraps every ~28.6 s, and the note parser rejects the
+// backwards jump as a torn frame. Walk the note stream (frames: nc_length,
+// nc_type, ..., u64 nc_systime at +8) and rewrite each systime as a monotonic
+// 64-bit count by adding 2^32 for every wrap. Notes may arrive slightly out of
+// order around a wrap; those get the previous epoch instead of a new wrap.
+void unwrap_note_systime(std::vector<uint8_t>& stream, NoteUnwrapStats* stats = nullptr);
+
 // Resolve a captured value (the written "current task" pointer) to a thread
 // identity. On NuttX this reads the TCB (pid, entry->symbol) from the ELF image
 // (doc §4); the default implementation just formats the pointer, so the

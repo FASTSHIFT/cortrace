@@ -357,3 +357,162 @@ TEST(nxtrace_reattribute_gap_and_no_runs)
     auto out1 = reattribute_slices_to_threads(etm2, runs, 2000, tracks2);
     CHECK_EQ(out1[0].track, 0);
 }
+
+// ---- ITM software stimulus extraction ------------------------------------
+namespace {
+// Instrumentation packet header: bits[7:3]=port, bit2=0, bits[1:0]=SS.
+uint8_t sw_hdr(int port, int ss) { return static_cast<uint8_t>((port << 3) | (ss & 3)); }
+} // namespace
+
+TEST(itm_extract_reassembles_port_payload_in_order)
+{
+    std::vector<uint8_t> s;
+    s.push_back(sw_hdr(1, 3)); // port 1, 4 bytes
+    push_le(s, 0x04030201u, 4);
+    s.push_back(sw_hdr(1, 2)); // port 1, 2 bytes
+    push_le(s, 0x0605u, 2);
+    s.push_back(sw_hdr(1, 1)); // port 1, 1 byte
+    s.push_back(0x07);
+    ItmStats st;
+    auto out = extract_itm_stimulus(s, 1, &st);
+    CHECK_EQ((long)out.size(), 7L);
+    for (int i = 0; i < 7; ++i)
+        CHECK_EQ((long)out[i], (long)(i + 1));
+    CHECK_EQ((long)st.port_packets, 3L);
+}
+
+TEST(itm_extract_ignores_other_ports_and_hw_packets)
+{
+    std::vector<uint8_t> s;
+    s.push_back(sw_hdr(2, 1)); // another port
+    s.push_back(0xAA);
+    s.push_back(dwt_write_hdr(0, 3)); // DWT hardware packet: must not be copied
+    push_le(s, 0x24000400u, 4);
+    s.push_back(sw_hdr(1, 1));
+    s.push_back(0x55);
+    ItmStats st;
+    auto out = extract_itm_stimulus(s, 1, &st);
+    CHECK_EQ((long)out.size(), 1L);
+    CHECK_EQ((long)out[0], 0x55L);
+    CHECK_EQ((long)st.sw_packets, 2L);
+    CHECK_EQ((long)st.hw_packets, 1L);
+}
+
+TEST(itm_extract_skips_timestamps_between_packets)
+{
+    std::vector<uint8_t> s;
+    s.push_back(sw_hdr(1, 3));
+    push_le(s, 0x11223344u, 4);
+    s.push_back(0xC0); // LTS1 header
+    s.push_back(0xB3); // continuation
+    s.push_back(0x21); // final payload byte
+    s.push_back(0x30); // LTS2
+    s.push_back(0x00); // zero / sync
+    s.push_back(sw_hdr(1, 1));
+    s.push_back(0x99);
+    ItmStats st;
+    auto out = extract_itm_stimulus(s, 1, &st);
+    CHECK_EQ((long)out.size(), 5L);
+    CHECK_EQ((long)out[4], 0x99L);
+    CHECK_EQ((long)st.timestamps, 2L);
+}
+
+TEST(itm_extract_flags_truncated_tail)
+{
+    std::vector<uint8_t> s;
+    s.push_back(sw_hdr(1, 3));
+    s.push_back(0x01); // 4-byte packet cut short
+    ItmStats st;
+    auto out = extract_itm_stimulus(s, 1, &st);
+    CHECK_EQ((long)out.size(), 0L);
+    CHECK(st.truncated);
+}
+
+TEST(itm_extract_counts_overflow_packets)
+{
+    std::vector<uint8_t> s;
+    s.push_back(sw_hdr(1, 1));
+    s.push_back(0x11);
+    s.push_back(0x70); // ITM overflow
+    s.push_back(sw_hdr(1, 1));
+    s.push_back(0x22);
+    ItmStats st;
+    auto out = extract_itm_stimulus(s, 1, &st);
+    CHECK_EQ((long)out.size(), 2L);
+    CHECK_EQ((long)st.overflows, 1L);
+    CHECK_EQ((long)st.other, 0L);
+}
+
+// ---- note timestamp unwrap ------------------------------------------------
+namespace {
+// A 16-byte note header with a given 32-bit systime and no body.
+void push_note(std::vector<uint8_t>& v, uint32_t systime, int type = 3)
+{
+    v.push_back(16); // nc_length
+    v.push_back(static_cast<uint8_t>(type));
+    v.push_back(100); // priority
+    v.push_back(0); // cpu
+    push_le(v, 2, 4); // pid
+    push_le(v, systime, 4); // systime low
+    push_le(v, 0, 4); // systime high (raw 32-bit counter)
+}
+uint64_t note_systime(const std::vector<uint8_t>& v, std::size_t note_idx)
+{
+    uint64_t t = 0;
+    for (int b = 0; b < 8; ++b)
+        t |= static_cast<uint64_t>(v[note_idx * 16 + 8 + b]) << (8 * b);
+    return t;
+}
+} // namespace
+
+TEST(note_unwrap_extends_across_a_counter_wrap)
+{
+    std::vector<uint8_t> s;
+    push_note(s, 0xFFFFFF00u);
+    push_note(s, 0xFFFFFFF0u);
+    push_note(s, 0x00000100u); // wrapped
+    push_note(s, 0x00000200u);
+    NoteUnwrapStats st;
+    unwrap_note_systime(s, &st);
+    CHECK_EQ((long)st.wraps, 1L);
+    CHECK_EQ((long)st.notes, 4L);
+    CHECK_EQ((long)note_systime(s, 0), 0xFFFFFF00L);
+    CHECK_EQ((long long)note_systime(s, 2), (1LL << 32) + 0x100);
+    CHECK_EQ((long long)note_systime(s, 3), (1LL << 32) + 0x200);
+}
+
+TEST(note_unwrap_keeps_a_late_note_in_the_old_epoch)
+{
+    std::vector<uint8_t> s;
+    push_note(s, 0xFFFFFFF0u);
+    push_note(s, 0x00000010u); // wrap
+    push_note(s, 0xFFFFFFF8u); // slightly late, stamped before the wrap
+    push_note(s, 0x00000020u);
+    NoteUnwrapStats st;
+    unwrap_note_systime(s, &st);
+    CHECK_EQ((long)st.wraps, 1L);
+    CHECK_EQ((long long)note_systime(s, 2), 0xFFFFFFF8LL);
+    CHECK_EQ((long long)note_systime(s, 3), (1LL << 32) + 0x20);
+}
+
+TEST(note_unwrap_is_identity_without_a_wrap)
+{
+    std::vector<uint8_t> s;
+    push_note(s, 100);
+    push_note(s, 200);
+    auto copy = s;
+    NoteUnwrapStats st;
+    unwrap_note_systime(s, &st);
+    CHECK_EQ((long)st.wraps, 0L);
+    CHECK(s == copy);
+}
+
+TEST(note_unwrap_skips_garbage_and_resyncs)
+{
+    std::vector<uint8_t> s = { 0xAA, 0x01, 0x02 }; // stream starts mid-note
+    push_note(s, 500);
+    NoteUnwrapStats st;
+    unwrap_note_systime(s, &st);
+    CHECK_EQ((long)st.notes, 1L);
+    CHECK(st.skipped_bytes >= 3);
+}
