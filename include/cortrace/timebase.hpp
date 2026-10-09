@@ -62,6 +62,22 @@ std::vector<SliceEvent> apply_etm_timestamp(
 std::vector<SliceEvent> apply_cycle_time(
     const std::vector<SliceEvent>& slices, double sysclk_hz = 0.0);
 
+// Wall-clock time with CPU-cycle resolution: ETM global timestamps (TSGEN, wall
+// clock, but only refreshed at sparse TS packets) are the anchors, and the
+// accumulated cycle count interpolates between them.
+//
+//   tick = ts_ns(anchor) + (cycle_clock - cycle_clock_at_anchor) * 1e9 / sysclk_hz
+//
+// clamped to the next anchor, so a gap the cycle counter did not see (the core
+// asleep in WFI: the ETM cycle count does not run there, TSGEN does) lands on
+// the next anchor instead of drifting. Plain apply_etm_timestamp() collapses
+// everything between two TS packets onto one tick (most slices end up zero
+// width); plain apply_cycle_time() is fine-grained but loses idle time.
+// Needs tsgen_hz > 0 and sysclk_hz > 0; otherwise falls back to
+// apply_etm_timestamp().
+std::vector<SliceEvent> apply_hybrid_time(
+    const std::vector<SliceEvent>& slices, double tsgen_hz, double sysclk_hz);
+
 } // namespace cortrace
 
 #endif // CORTRACE_TIMEBASE_HPP

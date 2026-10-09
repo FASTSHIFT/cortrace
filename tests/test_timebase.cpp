@@ -142,3 +142,60 @@ TEST(etm_timestamp_shared_value_keeps_order)
     CHECK_EQ((long)out[1].tick, 7L);
     CHECK_EQ((long)out[2].tick, 7L);
 }
+
+// ---- hybrid time base ------------------------------------------------------
+namespace {
+SliceEvent hy_ev(uint64_t etm_ts, uint64_t cycles)
+{
+    SliceEvent e;
+    e.etm_ts = etm_ts;
+    e.cycle_clock = cycles;
+    return e;
+}
+} // namespace
+
+TEST(hybrid_time_interpolates_between_anchors_by_cycles)
+{
+    // TSGEN 75 MHz (13.33 ns/count), CPU 150 MHz (6.67 ns/cycle): 150 cycles = 1000 ns.
+    std::vector<SliceEvent> s = { hy_ev(75, 0), hy_ev(75, 150), hy_ev(75, 300), hy_ev(300, 450) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[0].tick, 1000LL); // 75 counts = 1000 ns
+    CHECK_EQ((long long)out[1].tick, 2000LL); // +150 cycles = +1000 ns
+    CHECK_EQ((long long)out[2].tick, 3000LL);
+    CHECK_EQ((long long)out[3].tick, 4000LL); // next anchor: 300 counts = 4000 ns
+}
+
+TEST(hybrid_time_jumps_to_the_next_anchor_across_a_sleep)
+{
+    // The cycle counter saw 3000 ns of run time but TSGEN moved 100000 ns (the
+    // core slept in WFI): the next anchor is the truth for what follows.
+    std::vector<SliceEvent> s = { hy_ev(75, 0), hy_ev(75, 450), hy_ev(7575, 450) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[1].tick, 4000LL);
+    CHECK_EQ((long long)out[2].tick, 101000LL);
+}
+
+TEST(hybrid_time_never_passes_the_next_anchor)
+{
+    // More cycles than TSGEN time (clock skew): clamp, stay monotonic.
+    std::vector<SliceEvent> s = { hy_ev(75, 0), hy_ev(75, 3000), hy_ev(150, 3000) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[1].tick, 2000LL); // clamped to the next anchor (150 counts)
+    CHECK_EQ((long long)out[2].tick, 2000LL);
+}
+
+TEST(hybrid_time_places_events_before_the_first_timestamp)
+{
+    std::vector<SliceEvent> s = { hy_ev(0, 0), hy_ev(0, 150), hy_ev(75, 300) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[2].tick, 1000LL);
+    CHECK(out[0].tick <= out[1].tick);
+    CHECK(out[1].tick <= out[2].tick);
+}
+
+TEST(hybrid_time_without_rates_falls_back_to_etm_timestamp)
+{
+    std::vector<SliceEvent> s = { hy_ev(75, 0), hy_ev(150, 100) };
+    auto out = apply_hybrid_time(s, 0.0, 150e6);
+    CHECK_EQ((long long)out[0].tick, 75LL); // raw counts
+}
