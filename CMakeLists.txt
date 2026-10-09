@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortrace VERSION 0.1.0 LANGUAGES CXX)
+project(cortrace VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -117,6 +117,17 @@ else()
     else()
         message(STATUS "OpenCSD not found: core-only build (decoder adapter skipped)")
     endif()
+endif()
+
+# ---- capture helper (plain C, no OpenCSD) ----------------------------------
+# UDP -> file capture for the FPGA trace streamer (recv thread + RAM ring +
+# writer thread). Needs no privileges on Linux >= 5.7.
+find_package(Threads REQUIRED)
+add_executable(cortrace-grab tools/cortrace_grab.c)
+target_link_libraries(cortrace-grab PRIVATE Threads::Threads)
+target_compile_options(cortrace-grab PRIVATE -O2 -Wall -Wextra)
+if(CORTRACE_WERROR)
+    target_compile_options(cortrace-grab PRIVATE -Werror)
 endif()
 
 # ---- CLI front end (needs the OpenCSD-backed decoder) ---------------------
