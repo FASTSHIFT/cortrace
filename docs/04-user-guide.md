@@ -371,6 +371,47 @@ sequenceDiagram
 > 已验证的部分：WebSocket 握手、来源（Origin）校验、点 Start 后的服务端流程（见 deb 的冒烟测试和
 > `python/tests`）。浏览器里的菜单文字会随 Perfetto UI 的版本略有不同，以实际界面为准。
 
+### 5.1 另一种入口：由 nxtrace 起头，`--companion-cmd` 拉起 cortrace
+
+如果你本来就在用 pynuttx 的 `nxtrace traced`（Perfetto 里点 Start 录 NuttX 软件 trace），可以让它在
+**下发设备 START 的同时**，顺手运行一条命令去抓硬件 trace，两边就覆盖同一个时间窗口。这条命令就是
+`cortrace capture`：
+
+```sh
+python -m nxtrace traced --elf /abs/path/nuttx --ws-port 8037 \
+    --companion-cmd "cortrace capture --elf /abs/path/nuttx --out-dir /abs/path/traces \
+                     --iface <nic> --secs {secs} --tag {tag} --tcbmap /abs/path/tcbmap.txt" \
+    none
+```
+
+`cortrace capture` 的选项和直接用时一样：`--iface`（或在启动 nxtrace 的 shell 里设 `CORTRACE_IFACE`，
+子进程会继承）、`--out-dir`（或 `CORTRACE_OUT_DIR`）；`{secs}` 超过 5 秒还要加 `--allow-long`。
+
+`--companion-cmd` 的行为（来自 `nxtrace traced --help`）：
+
+- 命令**不经过 shell** 执行：不会展开 `~`、环境变量、管道和重定向，路径一律写绝对路径。
+- 命令里的 `{secs}` 和 `{tag}` 会被替换：`{secs}` 是 UI 里设置的录制时长，UI 没设时用 `--companion-secs`
+  （默认 1.0 秒）；`{tag}` 是这一次录制的标签，用它给 `cortrace capture --tag` 命名，文件就和 nxtrace
+  的记录对得上。
+- 命令自己跑到结束，**点 Stop 不会等它**。它的日志和计时记录写在 `/tmp/nxtrace-companion-<tag>.log` 和
+  `.json`，抓取没成功先看这里。
+- 数据源参数放在最后。当前内核的 note 走 ITM、随硬件抓取一起进来，不需要 nxtrace 另外收数据，所以用
+  `none`（只起服务，不收数据）；浏览器里 nxtrace 自己的统计（比如丢包摘要）显示为 0 是正常的，因为没有
+  数据经过它。如果你的内核仍然用 RTT 输出 note，换成 `tcp 127.0.0.1:9091`（常驻 OpenOCD 的 RTT 服务）。
+
+结果在 `--out-dir` 里，和直接 `cortrace capture` 的产物一样：硬件 trace 是 `hw_<tag>.perfetto`。命令里加
+`--fuse` 就得到 `fused_<tag>.perfetto`，硬件和软件在同一条时间轴上。和 `cortrace serve` 的区别：
+
+| | `cortrace serve`（第 5 节） | `nxtrace traced --companion-cmd` |
+|---|---|---|
+| 需要 pynuttx | 只有融合模式需要 | 需要 |
+| 抓完的结果 | 回到**同一个页面**里显示 | 在输出目录里，自己打开（`cortrace open` 或拖进 Perfetto） |
+| 录制时长 | 由 `--secs` 决定，忽略 UI 的设置 | 取 UI 里的时长，没设用 `--companion-secs` |
+| 适合 | 只用 cortrace，想点一下就看到结果 | 已经用 nxtrace 的流程，或者软件 trace 来自 RTT |
+
+注意：两个服务默认都从端口 8037 起（`nxtrace traced` 的 `--ws-port 0` 会从 8037 往上找第一个空闲的），
+不要同时用同一个端口；`cortrace serve` 换端口用 `--port`，nxtrace 用 `--ws-port`。
+
 ## 6. 磁盘与限制
 
 1 秒抓取的数据量：原始 75 MB + 解码产物约 355 MB，合计约 450 MB（融合模式因为就地追加，和独立模式差不多）。
