@@ -26,7 +26,7 @@ docker run --rm \
             build-essential cmake git python3 dpkg-dev file ca-certificates >/dev/null
         git config --global --add safe.directory /src
         cmake -S /src -B /tmp/build -DCMAKE_BUILD_TYPE=Release \
-              -DCORTRACE_OPENCSD_STATIC=ON \
+              -DCORTRACE_OPENCSD_STATIC=ON -DCORTRACE_WERROR=ON \
               ${CORTRACE_VERSION:+-DCORTRACE_VERSION=$CORTRACE_VERSION}
         cmake --build /tmp/build -j"$(nproc)"
         (cd /tmp/build && ctest --output-on-failure && cpack -G DEB)

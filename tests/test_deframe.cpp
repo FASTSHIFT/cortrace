@@ -4,6 +4,7 @@
 #include "cortrace/deframe.hpp"
 #include "test_framework.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -36,8 +37,15 @@ std::vector<uint8_t> make_frame_stream(uint8_t stream, const std::vector<uint8_t
 
 std::vector<uint8_t> with_sync(const std::vector<uint8_t>& frame)
 {
-    std::vector<uint8_t> s = { 0xFF, 0xFF, 0xFF, 0x7F };
-    s.insert(s.end(), frame.begin(), frame.end());
+    // Size the vector once and copy into it. Growing a 4-element vector inside
+    // insert() (or insert() after reserve()) trips -Wstringop-overread /
+    // -Wstringop-overflow false positives in GCC 11's <vector>.
+    std::vector<uint8_t> s(4 + frame.size());
+    s[0] = 0xFF;
+    s[1] = 0xFF;
+    s[2] = 0xFF;
+    s[3] = 0x7F;
+    std::copy(frame.begin(), frame.end(), s.begin() + 4);
     return s;
 }
 
