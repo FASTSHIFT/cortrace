@@ -11,12 +11,12 @@ Note the RTL has a documented 1-cycle stale-read on the FIRST data byte, so we
 read each register at its own base with a couple of extra bytes and take the
 byte at the position that is known-good (index 1 of the data region).
 
-Usage: cortrace fpga health [ip] [blackbox|ddr3|reset]
+Usage: cortrace fpga health [ip] [--check {health,ddr3,blackbox}] [--reset]
 """
 
+import argparse
 import socket
 import struct
-import sys
 import time
 
 IP = "192.168.10.42"  # module-level target; main() sets it from argv
@@ -268,22 +268,46 @@ def blackbox_check(ip):
     return 0
 
 
-def main(
-    argv=None,
-):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="cortrace fpga health",
+        description="One-shot FPGA observability readout over the :5001 readout path.",
+    )
+    ap.add_argument(
+        "ip", nargs="?", default=IP, help="FPGA address (default: %(default)s)"
+    )
+    ap.add_argument(
+        "--check",
+        choices=("health", "ddr3", "blackbox"),
+        default="health",
+        help="health: debug register file (default); ddr3: DDR3 self-test status "
+        "page; blackbox: black-box writer status",
+    )
+    ap.add_argument(
+        "--reset",
+        action="store_true",
+        help="pulse a soft reset first, so the readout reflects a cleared state "
+        "(--check health only)",
+    )
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
     global IP  # pylint: disable=global-statement
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and "." in argv[0]:
-        IP = argv.pop(0)
-    # `fpga_health.py [ip] blackbox` reads the P2b-1 black-box writer status.
-    if "blackbox" in argv or "bb" in argv:
+    a = parse_args(argv)
+    IP = a.ip
+    if a.check == "blackbox":
         return blackbox_check(IP)
-    # `fpga_health.py [ip] ddr3` reads the DDR3 self-test status page instead.
-    if "ddr3" in argv:
+    if a.check == "ddr3":
         return ddr3_check(IP)
-    # optional: `fpga_health.py [ip] reset` pulses a soft reset first, so the
-    # readout that follows reflects a fresh (cleared) state.
-    if "reset" in argv:
+    return health_check(a.reset)
+
+
+def health_check(
+    reset=False,
+):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """Debug-register readout and diagnosis; returns the exit code."""
+    if reset:
         soft_reset(IP)
         time.sleep(0.2)
 

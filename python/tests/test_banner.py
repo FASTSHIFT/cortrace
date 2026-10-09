@@ -51,12 +51,13 @@ def test_environment_variable_silences_it(monkeypatch):
 
 
 def run_cli(monkeypatch, argv):
+    """Run cli.main with every command stubbed; returns (exit code, banner shown)."""
     shown = []
     monkeypatch.setattr(cli.banner, "show", lambda: shown.append(True))
     for name in list(cli.COMMANDS):
         monkeypatch.setitem(cli.COMMANDS, name, lambda args: 0)
-    code = cli.main(argv)
-    return code, bool(shown)
+    monkeypatch.setattr(cli, "_lazy", lambda module: lambda args: 0)
+    return cli.main(argv), bool(shown)
 
 
 @pytest.mark.parametrize("cmd", ["capture", "serve", "fuse"])
@@ -65,16 +66,32 @@ def test_long_running_commands_show_it(monkeypatch, cmd):
 
 
 @pytest.mark.parametrize(
-    "cmd", ["align", "tcbmap", "open", "fpga", "decode", "version"]
+    "argv",
+    [["align"], ["tcbmap"], ["open"], ["decode"], ["version"], ["fpga", "net"]],
 )
-def test_helper_commands_stay_quiet(monkeypatch, cmd):
-    assert run_cli(monkeypatch, [cmd])[1] is False
+def test_helper_commands_stay_quiet(monkeypatch, argv):
+    assert run_cli(monkeypatch, argv)[1] is False
 
 
-def test_help_shows_it_and_no_banner_flag_hides_it(monkeypatch):
-    assert run_cli(monkeypatch, ["--help"])[1] is True
-    assert run_cli(monkeypatch, [])[1] is True
-    assert run_cli(monkeypatch, ["--help", "--no-banner"])[1] is False
+def test_help_shows_it(monkeypatch, capsys):
+    assert run_cli(monkeypatch, ["--help"]) == (0, True)
+    assert run_cli(monkeypatch, ["help"]) == (0, True)
+    assert run_cli(monkeypatch, []) == (2, True)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--no-banner", "capture", "--elf", "x"],  # before the command
+        ["capture", "--no-banner", "--elf", "x"],  # after it
+        ["--help", "--no-banner"],
+        ["--no-banner"],
+    ],
+)
+def test_no_banner_flag_hides_it_in_either_position(monkeypatch, capsys, argv):
+    assert run_cli(monkeypatch, argv)[1] is False
+    capsys.readouterr()
 
 
 def test_no_banner_flag_is_not_passed_to_the_command(monkeypatch):
@@ -82,4 +99,5 @@ def test_no_banner_flag_is_not_passed_to_the_command(monkeypatch):
     monkeypatch.setattr(cli.banner, "show", lambda: None)
     monkeypatch.setitem(cli.COMMANDS, "capture", lambda args: seen.append(args) or 0)
     assert cli.main(["capture", "--no-banner", "--elf", "x"]) == 0
-    assert seen == [["--elf", "x"]]
+    assert cli.main(["--no-banner", "capture", "--elf", "y"]) == 0
+    assert seen == [["--elf", "x"], ["--elf", "y"]]

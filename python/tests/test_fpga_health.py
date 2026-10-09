@@ -86,7 +86,7 @@ def test_wrong_magic_warns(board, capsys):
 def test_reset_flag_pulses_soft_reset_first(board, capsys):
     mem, fake = board
     healthy(mem)
-    assert run("reset") == 0
+    assert run("--reset") == 0
     assert (health.REG_SOFTRST, 1) in fake.csr_writes
     assert "soft reset pulsed" in capsys.readouterr().out
 
@@ -97,24 +97,24 @@ def test_ddr3_page(board, capsys):
     put(mem, health.A_DDR3_FLAGS, 0b101)  # calib + mig calib, no error
     put(mem, health.A_DDR3_PASSB, 7, 4)
     put(mem, health.A_BUILD_ID, 1_700_000_000, 4)
-    assert run("ddr3") == 0
+    assert run("--check", "ddr3") == 0
     assert "DDR3 PASS" in capsys.readouterr().out
     put(mem, health.A_DDR3_PASSB, 0, 4)
-    assert run("ddr3") == 0
+    assert run("--check", "ddr3") == 0
     assert "no verified bursts" in capsys.readouterr().out
     put(mem, health.A_DDR3_FLAGS, 0)
-    assert run("ddr3") == 2
+    assert run("--check", "ddr3") == 2
     assert "NOT calibrated" in capsys.readouterr().out
     put(mem, health.A_DDR3_FLAGS, 0b111)  # calib + sticky error
     put(mem, health.A_DDR3_ERRC, 3, 4)
-    assert run("ddr3") == 2
+    assert run("--check", "ddr3") == 2
     out = capsys.readouterr().out
     assert "MISMATCH" in out and "all-zero" in out
     put(mem, health.A_DDR3_GOTLO, 5)
-    assert run("ddr3") == 2
+    assert run("--check", "ddr3") == 2
     assert "first word wrong" in capsys.readouterr().out
     put(mem, health.A_DDR3_MAGIC, 0)
-    assert run("ddr3") == 1
+    assert run("--check", "ddr3") == 1
 
 
 def test_blackbox_page(board, capsys):
@@ -123,19 +123,19 @@ def test_blackbox_page(board, capsys):
     put(mem, 0xFF51, 0b101)  # calib + TRACECLK active
     put(mem, 0xFF52, 100, 4)  # words written
     put(mem, 0xFF56, 2, 4)  # lost
-    assert run("blackbox") == 0
+    assert run("--check", "blackbox") == 0
     out = capsys.readouterr().out
     assert "BLACK BOX RECORDING" in out and "capture-side bytes dropped" in out
     put(mem, 0xFF52, 0, 4)
-    assert run("bb") == 0
+    assert run("--check", "blackbox") == 0
     assert "0 words written" in capsys.readouterr().out
     put(mem, 0xFF51, 0b001)
-    assert run("bb") == 0
+    assert run("--check", "blackbox") == 0
     assert "no TRACECLK" in capsys.readouterr().out
     put(mem, 0xFF51, 0)
-    assert run("bb") == 2
+    assert run("--check", "blackbox") == 2
     put(mem, 0xFF50, 0)
-    assert run("bb") == 1
+    assert run("--check", "blackbox") == 1
 
 
 def test_silent_fpga_is_a_failure(monkeypatch, capsys):
@@ -148,6 +148,16 @@ def test_silent_fpga_is_a_failure(monkeypatch, capsys):
 
     monkeypatch.setattr(health.socket, "socket", QuickSocket)
     assert health.main(["127.0.0.1"]) == 1
-    assert health.main(["127.0.0.1", "ddr3"]) == 1
-    assert health.main(["127.0.0.1", "bb"]) == 1
+    assert health.main(["127.0.0.1", "--check", "ddr3"]) == 1
+    assert health.main(["127.0.0.1", "--check", "blackbox"]) == 1
     assert "no reply on :5001" in capsys.readouterr().out
+
+
+def test_arguments_are_parsed_by_argparse():
+    a = health.parse_args([])
+    assert (a.ip, a.check, a.reset) == (health.IP, "health", False)
+    a = health.parse_args(["10.1.2.3", "--check", "ddr3", "--reset"])
+    assert (a.ip, a.check, a.reset) == ("10.1.2.3", "ddr3", True)
+    with pytest.raises(SystemExit) as e:
+        health.parse_args(["--check", "bogus"])
+    assert e.value.code == 2

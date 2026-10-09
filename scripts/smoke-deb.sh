@@ -19,7 +19,7 @@ docker run --rm -v "$DEB":/pkg/cortrace.deb:ro -e WANT="$WANT" "$IMAGE" bash -eu
 
     echo "== versions"
     [ "$(run cortrace version)" = "cortrace $WANT" ]
-    run cortrace --help | grep -q "^  serve "
+    run cortrace --help | grep -qE "^ +serve "
     run cortrace-decode --version
     run "cortrace-grab 2>&1 | grep -q usage"
 
