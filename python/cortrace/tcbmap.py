@@ -133,7 +133,7 @@ def oocd_read_words(addr, count):
     return words
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--elf", required=True)
     ap.add_argument("--out", default="tcbmap.txt")
@@ -146,7 +146,7 @@ def main():
         metavar="HOST:PORT",
         help="read via a running OpenOCD telnet server (e.g. 127.0.0.1:4444)",
     )
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     global OOCD_TELNET  # pylint: disable=global-statement
     OOCD_TELNET = a.telnet
     pid_off = int(a.pid_off, 0)

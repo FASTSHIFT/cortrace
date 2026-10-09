@@ -166,7 +166,7 @@ def global_fit(hw, notes, tol_ns):
     return best_off, best_res
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -196,7 +196,7 @@ def main():
         default=30.0,
         help="match tolerance around the fitted offset",
     )
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     name2pid = load_tcbmap(a.tcbmap)
     if a.hw_runs:

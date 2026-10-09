@@ -32,18 +32,11 @@ import tempfile
 import threading
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
-DEFAULT_DECODE = os.environ.get(
-    "CORTRACE_DECODE", os.path.join(REPO, "build-rel", "cortrace-decode")
-)
-PERFETTO_OPEN = os.path.join(HERE, "perfetto_open.py")
+from ._paths import find_binary
+from .align import main as align_main
+from .perfetto_open import main as perfetto_open_main
+
 CHUNK = 16 * 1024 * 1024
-
-
-def run(cmd, **kw):
-    print("[cortrace-fuse] $ " + " ".join(str(c) for c in cmd), file=sys.stderr)
-    return subprocess.run(cmd, check=False, **kw)
 
 
 def load_pb2(pynuttx):
@@ -137,9 +130,9 @@ def parse_args(argv=None):
     )
     ap.add_argument(
         "--cortrace-decode",
-        default=DEFAULT_DECODE,
-        help="cortrace-decode binary (default: $CORTRACE_DECODE, else "
-        "<repo>/build-rel/cortrace-decode)",
+        default=find_binary("CORTRACE_DECODE", "cortrace-decode"),
+        help="cortrace-decode binary (default: $CORTRACE_DECODE, else PATH, "
+        "else the source tree's build dir)",
     )
     ap.add_argument("--nm", default="arm-none-eabi-nm", help="nm for the ELF symbols")
     ap.add_argument("--width", type=int, choices=(4, 2, 1), default=4)
@@ -308,8 +301,6 @@ def main(argv=None):
     # Fit the constant offset between the two clocks (same capture, so the
     # switches pair up one-to-one; the offset is only the clock origin).
     align = [
-        sys.executable,
-        os.path.join(HERE, "align_check.py"),
         "--hw-runs",
         paths["runs"],
         "--note",
@@ -319,7 +310,7 @@ def main(argv=None):
     ]
     if a.tcbmap:
         align += ["--tcbmap", a.tcbmap]
-    align_ok = run(align).returncode == 0 and os.path.isfile(paths["offset"])
+    align_ok = align_main(align) == 0 and os.path.isfile(paths["offset"])
     offset = None
     if align_ok:
         with open(paths["offset"], encoding="utf-8") as f:
@@ -347,7 +338,7 @@ def main(argv=None):
     print(f"note text: {paths['note_txt']}\nraw notes: {paths['notes_bin']}")
     if a.open:
         for f in [fused] if fused else [paths["hw"], paths["note_pf"]]:
-            run([sys.executable, PERFETTO_OPEN, f, "--keep"])
+            perfetto_open_main([f, "--keep"])
     return 0
 
 

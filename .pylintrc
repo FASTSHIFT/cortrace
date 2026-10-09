@@ -1,4 +1,4 @@
-# Pylint config for cortrace Python helper scripts (scripts/*.py).
+# Pylint config for cortrace Python helper scripts (python/cortrace).
 # Pragmatic: these are host-side tooling, not a library. We keep the
 # correctness/bug checks and relax the docstring/style conventions that add
 # noise without value here.

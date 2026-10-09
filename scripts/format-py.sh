@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cortrace — Python format + lint for the host-side scripts (scripts/*.py).
+# Cortrace — Python format + lint for the host-side Python package (python/cortrace).
 # Formatting: black. Linting: pylint (see .pylintrc).
 #
 #   scripts/format-py.sh            format all Python sources in place (black)
@@ -44,13 +44,13 @@ fi
 
 # Lint production and test files with their respective rcfiles. pylint uses the
 # CWD's .pylintrc by default and does NOT auto-pick a per-directory one, so we
-# point tests at scripts/tests/.pylintrc explicitly (it relaxes test-only rules
+# point tests at python/tests/.pylintrc explicitly (it relaxes test-only rules
 # like protected-access).
 PROD=()
 TESTS=()
 for f in "${FILES[@]}"; do
     case "$f" in
-        scripts/tests/*) TESTS+=("$f") ;;
+        python/tests/*) TESTS+=("$f") ;;
         *) PROD+=("$f") ;;
     esac
 done
@@ -60,8 +60,8 @@ if [[ ${#PROD[@]} -gt 0 ]] && ! "$PYLINT" "${PROD[@]}"; then
     fail=1
 fi
 if [[ ${#TESTS[@]} -gt 0 ]] \
-    && ! "$PYLINT" --rcfile=scripts/tests/.pylintrc "${TESTS[@]}"; then
-    echo "error: pylint reported issues in tests (see scripts/tests/.pylintrc)" >&2
+    && ! "$PYLINT" --rcfile=python/tests/.pylintrc "${TESTS[@]}"; then
+    echo "error: pylint reported issues in tests (see python/tests/.pylintrc)" >&2
     fail=1
 fi
 

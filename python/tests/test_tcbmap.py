@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-import nx_tcbmap as tm
+from cortrace import tcbmap as tm
 
 
 class FakeOpenOcd:

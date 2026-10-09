@@ -1,4 +1,4 @@
-# Python tooling config for cortrace host-side scripts (scripts/*.py).
+# Python tooling config for cortrace host-side Python package (python/cortrace).
 # Formatting: black. Linting: pylint (see .pylintrc). Tests: pytest + coverage.
 
 [tool.black]
@@ -6,15 +6,15 @@ line-length = 88
 target-version = ["py310"]
 
 [tool.pytest.ini_options]
-testpaths = ["scripts/tests"]
+testpaths = ["python/tests"]
 addopts = "-q"
 
 # Line coverage (matches the C++ gcovr line-coverage gate; branch coverage is
 # intentionally off to keep parity).
 [tool.coverage.run]
 branch = false
-source = ["scripts"]
-omit = ["scripts/tests/*"]
+source = ["python/cortrace"]
+omit = ["python/tests/*"]
 
 [tool.coverage.report]
 # Keep parity with the C++ line-coverage gate (80%).

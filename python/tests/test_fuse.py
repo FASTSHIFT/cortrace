@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-import cortrace_fuse as cf
+from cortrace import fuse as cf
 
 
 class FakePacket:
@@ -177,12 +177,11 @@ def test_note_passes_are_launched_from_the_notes_line(monkeypatch, tmp_path):
     monkeypatch.setattr(cf.subprocess, "Popen", popen)
     monkeypatch.setattr(cf, "load_pb2", lambda _p: FAKE_PB2)
 
-    def fake_run(cmd, **_k):
-        if "align_check.py" in " ".join(str(c) for c in cmd):
-            (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
-        return types.SimpleNamespace(returncode=0)
+    def fake_align(_argv):
+        (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
+        return 0
 
-    monkeypatch.setattr(cf, "run", fake_run)
+    monkeypatch.setattr(cf, "align_main", fake_align)
     assert cf.main(base_args(tmp_path)) == 0
     assert events.count("note-job") == 2
     assert len(started) == 2
@@ -194,21 +193,22 @@ def test_full_pipeline_shifts_note_trace_and_fuses(monkeypatch, tmp_path):
     monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
     monkeypatch.setattr(cf, "load_pb2", lambda _p: FAKE_PB2)
     monkeypatch.setattr(cf, "shift_timestamps", lambda m, off: shifts.append(off))
-    calls = []
+    aligned, opened = [], []
 
-    def fake_run(cmd, **_kw):
-        calls.append([str(c) for c in cmd])
-        if "align_check.py" in " ".join(calls[-1]):
-            (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
-        return types.SimpleNamespace(returncode=0)
+    def fake_align(argv):
+        aligned.append(argv)
+        (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
+        return 0
 
-    monkeypatch.setattr(cf, "run", fake_run)
+    monkeypatch.setattr(cf, "align_main", fake_align)
+    monkeypatch.setattr(cf, "perfetto_open_main", opened.append)
     rc = cf.main(base_args(tmp_path, "--tcbmap", "map.txt", "--open"))
     assert rc == 0
     assert shifts == [-1000]  # note_ns - offset = hw_ns
     assert (tmp_path / "fused_t.perfetto").read_bytes() == b"HW" + b"[1001]"
     assert not (tmp_path / "note_t.raw.pftrace").exists()  # temp file removed
-    assert any("perfetto_open.py" in c[1] for c in calls)
+    assert "--tcbmap" in aligned[0] and "--hw-runs" in aligned[0]
+    assert opened and opened[0][-1] == "--keep"
 
 
 def test_alignment_failure_leaves_note_trace_unshifted(monkeypatch, tmp_path):
@@ -217,9 +217,7 @@ def test_alignment_failure_leaves_note_trace_unshifted(monkeypatch, tmp_path):
     monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
     monkeypatch.setattr(cf, "load_pb2", lambda _p: FAKE_PB2)
     monkeypatch.setattr(cf, "shift_timestamps", lambda m, off: shifts.append(off))
-    monkeypatch.setattr(
-        cf, "run", lambda cmd, **_k: types.SimpleNamespace(returncode=1)
-    )
+    monkeypatch.setattr(cf, "align_main", lambda _argv: 1)
     cf.main(base_args(tmp_path))
     assert not shifts  # offset 0: nothing to shift
     assert (tmp_path / "note_t.pftrace").exists()
@@ -234,9 +232,7 @@ def test_missing_note_trace_is_reported(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
     monkeypatch.setattr(cf.subprocess, "Popen", popen)
-    monkeypatch.setattr(
-        cf, "run", lambda cmd, **_k: types.SimpleNamespace(returncode=1)
-    )
+    monkeypatch.setattr(cf, "align_main", lambda _argv: 1)
     with pytest.raises(SystemExit) as e:
         cf.main(base_args(tmp_path))
     assert "no note trace" in str(e.value)

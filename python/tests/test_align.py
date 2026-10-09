@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import align_check as ac
+from cortrace import align as ac
 
 
 def write(tmp_path, name, text):

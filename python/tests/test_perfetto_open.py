@@ -4,7 +4,7 @@ the host-page HTML that drives the postMessage handoff)."""
 import json
 import socket
 
-import perfetto_open as po
+from cortrace import perfetto_open as po
 
 
 def test_pick_free_port_is_bindable():

@@ -5,7 +5,7 @@ import struct
 
 import pytest
 
-import perfetto_record_bridge as rb
+from cortrace import record_bridge as rb
 
 
 # ---- varint ---------------------------------------------------------------

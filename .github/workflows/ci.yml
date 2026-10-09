@@ -76,4 +76,4 @@ jobs:
       - name: Format + lint (black --check + pylint)
         run: bash scripts/format-py.sh --check
       - name: Tests + coverage gate (fail under 80%)
-        run: pytest scripts/tests --cov --cov-report=term-missing --cov-fail-under=80
+        run: pytest python/tests --cov --cov-report=term-missing --cov-fail-under=80

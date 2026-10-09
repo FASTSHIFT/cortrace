@@ -47,7 +47,7 @@ if [[ ${#PY[@]} -gt 0 ]]; then
         PROD=() ; TESTS=()
         for f in "${PY[@]}"; do
             case "$f" in
-                scripts/tests/*) TESTS+=("$f") ;;
+                python/tests/*) TESTS+=("$f") ;;
                 *) PROD+=("$f") ;;
             esac
         done
@@ -56,7 +56,7 @@ if [[ ${#PY[@]} -gt 0 ]]; then
             fail=1
         fi
         if [[ ${#TESTS[@]} -gt 0 ]] \
-            && ! pylint --rcfile=scripts/tests/.pylintrc "${TESTS[@]}" >/dev/null 2>&1; then
+            && ! pylint --rcfile=python/tests/.pylintrc "${TESTS[@]}" >/dev/null 2>&1; then
             echo "pre-commit: pylint issues in tests" >&2
             fail=1
         fi
