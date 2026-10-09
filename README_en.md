@@ -49,6 +49,9 @@ cortrace serve   --iface enx0123 --elf fw.elf          # then press Start in the
 > keep it attached. Fusing with NuttX's nxtrace needs pynuttx (the pip package, or `--pynuttx DIR` /
 > `$PYNUTTX` pointing at its sources).
 
+**The full walkthrough (standalone, hardware + software fusion, click-to-capture in the browser,
+troubleshooting) is in [`docs/04-user-guide.md`](docs/04-user-guide.md)** (written in Chinese).
+
 ## Why
 
 The trimmed-down ETMv4 decoders other projects use go wrong when capture

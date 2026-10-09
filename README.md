@@ -43,6 +43,8 @@ cortrace serve   --iface enx0123 --elf fw.elf          # 然后在网页里点 S
 > 本工具不负责在目标上启用 ETM/DWT/ITM：先用调试器配置好并保持连接。
 > 与 NuttX 的 nxtrace 融合需要 pynuttx（`pip install` 的包，或 `--pynuttx DIR` / `$PYNUTTX` 指向其源码）。
 
+**完整的使用步骤（独立模式、软硬融合、网页点击、排错）见 [`docs/04-user-guide.md`](docs/04-user-guide.md)。**
+
 ## 为什么
 
 其他项目使用的精简 ETMv4 解码器在采集质量边际时会出错：遇到损坏字节就带着过时的 PC

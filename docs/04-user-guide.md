@@ -1,0 +1,352 @@
+# Cortrace — 使用指南
+
+适用版本：1.0.0 起（Ubuntu 22.04 amd64）。本文按"装好就能用"的顺序写：安装 → 独立模式 → 软硬融合模式 →
+网页点击模式 → 排错。文中的数字（耗时、文件大小、匹配率）都来自在干净的 ubuntu:22.04 里用 `apt install`
+装好 deb 后，对真实板子（STM32H743 + Artix-7 采集器 + NuttX）实测的结果。
+
+> 设计背景见 [`00-architecture.md`](00-architecture.md)；Record 桥的协议细节见
+> [`03-perfetto-record-bridge.md`](03-perfetto-record-bridge.md)；NuttX 融合原理见
+> [`02-nxtrace-fusion.md`](02-nxtrace-fusion.md)。
+
+## 1. 两种工作方式
+
+| | 独立模式 | 软硬融合模式 |
+|---|---|---|
+| 内容 | 硬件 trace：ETM 函数调用栈 + DWT 线程泳道 | 在独立模式之上，再把 NuttX 的调度 note（经 ITM 同一个 TPIU 出来）放到同一条时间轴 |
+| 目标固件 | 任意 Cortex-M 固件（裸机、RTOS 均可）；线程泳道需要 NuttX | NuttX，且开启 `CONFIG_ARMV7M_NOTE_ITM` |
+| 额外依赖 | 无 | pynuttx（提供 `nxtrace`） |
+| 命令 | `cortrace capture` | `cortrace capture --fuse` |
+| 产物 | `hw_<tag>.perfetto` | `fused_<tag>.perfetto`（硬件 + 软件） |
+
+两种模式都可以用命令行跑，也可以用 **网页点击模式**（`cortrace serve`）：在 ui.perfetto.dev 的 Record 页面点
+Start，抓取、解码、显示一气呵成（见第 5 节）。
+
+数据怎么流动（虚线框是只有融合模式才有的部分）：
+
+```mermaid
+flowchart LR
+    subgraph T["目标板 (Cortex-M)"]
+        ETM["ETM<br/>指令流"]
+        DWT["DWT<br/>线程切换"]
+        ITM["ITM 端口 1<br/>NuttX 调度 note"]
+        TPIU["TPIU 并口<br/>4/2/1 bit"]
+        ETM --> TPIU
+        DWT --> TPIU
+        ITM --> TPIU
+    end
+    subgraph F["FPGA 采集器"]
+        CAP["采样 + DDR3 缓冲<br/>UDP :5555"]
+    end
+    subgraph P["PC 上的 cortrace"]
+        GRAB["cortrace-grab<br/>raw_TAG.bin"]
+        DEC["cortrace-decode<br/>deframe + OpenCSD + 调用栈"]
+        HW["hw_TAG.perfetto<br/>(独立模式的产物)"]
+        NX["nxtrace (pynuttx)<br/>note 转软件 trace"]
+        ALN["对齐时钟 + 拼接"]
+        FUSED["fused_TAG.perfetto<br/>(融合模式的产物)"]
+    end
+    UI["ui.perfetto.dev"]
+    TPIU --> CAP --> GRAB --> DEC --> HW
+    DEC -->|"ITM 字节流"| NX
+    DEC -->|"线程切换 hwruns.tsv"| ALN
+    NX --> ALN
+    HW --> ALN --> FUSED
+    HW --> UI
+    FUSED --> UI
+    classDef fusion stroke-dasharray: 5 5
+    class ITM,NX,ALN,FUSED fusion
+```
+
+选哪种模式、用什么方式触发，两个问题互相独立：
+
+```mermaid
+flowchart TD
+    Q1{"需要 NuttX 调度 note<br/>和硬件 trace 对照吗？"}
+    Q1 -->|"不需要，或不是 NuttX"| M1["独立模式<br/>不带 --fuse"]
+    Q1 -->|"需要"| M2["融合模式<br/>加 --fuse（需要 pynuttx）"]
+    M1 --> Q2{"怎么触发抓取？"}
+    M2 --> Q2
+    Q2 -->|"在终端里敲命令"| C1["cortrace capture …"]
+    Q2 -->|"在浏览器里点 Start"| C2["cortrace serve …"]
+```
+
+## 2. 开始之前
+
+**硬件链路**
+
+1. 目标板的 ETM / DWT / ITM 必须由调试器配置好，并且**调试器要一直连着**（它持有 `C_DEBUGEN`，否则 NuttX 会把
+   DWT 配置清掉）。cortrace 只负责采集和解码，不负责在目标上启用 trace。本仓库的参考做法是
+   cortrace-fpga 里的 `nxtrace_rtt.sh`（OpenOCD 常驻会话，启动时打印 `nxtrace_dap: armed`）。
+2. FPGA 采集器通过网线直连 PC。采集用的网口需要配置主机地址 `<HOST_IP>`/24（FPGA 往这个地址推 UDP 流，
+   端口 5555）：`sudo ip addr add <HOST_IP>/24 dev <nic>`。主机地址不对时现象是 ARP 正常、但抓到 0 字节。
+   具体地址见 cortrace-fpga 的文档。
+3. 准备好固件的 ELF（解码要从 ELF 读指令）。
+
+接线和各自的职责：
+
+```mermaid
+flowchart LR
+    DBG["调试器 (CMSIS-DAP)<br/>+ 常驻 OpenOCD"]
+    MCU["目标板<br/>Cortex-M / NuttX"]
+    FPGA["FPGA 采集器<br/>地址 FPGA_IP"]
+    NIC["PC 网口 nic<br/>地址 HOST_IP/24"]
+    CT["cortrace"]
+    DBG -->|"SWD：武装 ETM/DWT/ITM<br/>并持有 C_DEBUGEN"| MCU
+    MCU -->|"TRACECLK + TRACED[3:0]"| FPGA
+    FPGA -->|"网线直连<br/>UDP :5555 推到 HOST_IP"| NIC
+    NIC --> CT
+    DBG -.->|"telnet :4444<br/>cortrace tcbmap 读线程名"| CT
+```
+
+**软件**：Ubuntu 22.04 amd64。融合模式额外需要 pynuttx 和它的 Python 依赖（第 4 节）。
+
+## 3. 安装
+
+从 [GitHub Releases](https://github.com/FASTSHIFT/cortrace/releases) 下载 `cortrace_<版本>_amd64.deb`：
+
+```sh
+sudo apt install ./cortrace_*_amd64.deb
+cortrace version          # 例如 1.0.0
+```
+
+- 会自动带上 `python3` 和 `binutils-arm-none-eabi`（提供 `arm-none-eabi-nm`）。
+- 装进系统的有 `cortrace`、`cortrace-decode`、`cortrace-grab` 三个命令和 Python 包 `cortrace`。
+- **不需要任何特权**：`cortrace-grab` 在 Linux ≥ 5.7 上免 root、免 `setcap`。只有 `cortrace fpga net`
+  的 ARP 发现需要 `CAP_NET_RAW`，不用它就不需要。
+- 卸载：`sudo apt remove cortrace`。
+
+**输出目录必须自己指定**——`--out-dir DIR`，或者一次性 `export CORTRACE_OUT_DIR=DIR`。cortrace 不替你选位置，
+也不会自动删除任何文件（原因和磁盘占用见第 6 节）。下文默认已经设好：
+
+```sh
+export CORTRACE_OUT_DIR=~/traces
+export CORTRACE_IFACE=<nic>         # 采集用的网口，也可以每次写 --iface
+```
+
+## 4. 命令行用法
+
+### 4.1 独立模式：只要硬件 trace
+
+```sh
+cortrace capture --elf fw.elf --secs 1 --width 4 --tag demo \
+                 --time-base hybrid --tsgen-hz 75e6 --tcbmap tcbmap.txt
+```
+
+做了什么：把 FPGA 的 TPIU 位宽设为 `--width`（并重新武装）→ 用 `cortrace-grab` 抓 `--secs` 秒 UDP 流到
+`raw_<tag>.bin` → `cortrace-decode` 解码 → 写 `hw_<tag>.perfetto`，最后在 stdout 打印这个文件的路径。
+
+实测（1 秒抓取）：原始数据 75 MB，`hw_*.perfetto` 约 355 MB，端到端约 16 秒。解码结束时会打印质量摘要，
+**以这两行为准判断这次抓取是否可信**：
+
+```
+begins / ends : 6698172 / 6698172  (balanced)
+stream health : lost-sync=0 overflow=0 resync(TraceOn)=0 addr-nacc=0 ... -> clean
+```
+
+`balanced` 表示调用栈配平；`-> clean` 表示没有丢同步/溢出。出现 `lost-sync` 或 `overflow` 说明 ETM 在片上溢出了
+（trace 量超过 TPIU 带宽），解决办法见第 7 节。
+
+常用选项：
+
+| 选项 | 作用 |
+|------|------|
+| `--time-base cycle`（默认） | 用 ETM 周期计数当时间基，分辨率到 CPU 周期；不需要 `--tsgen-hz` |
+| `--time-base etm` | 用 ETM 时间戳（墙钟）；需要 `--tsgen-hz` |
+| `--time-base hybrid` | 墙钟时间戳之间用周期数插值，睡眠期间不漂、片段内有周期分辨率；需要 `--tsgen-hz` 和 `--sysclk-hz` |
+| `--tsgen-hz` / `--sysclk-hz` | ETM 时间戳时钟 / CPU 时钟（默认 150 MHz） |
+| `--tcbmap FILE` | 线程名映射（见下），没有的话线程显示成 `tcb@0x…` |
+| `--raw-in FILE` | 不抓取，直接解码一份已有的 raw 文件 |
+| `--open` | 完成后在浏览器里打开结果 |
+| `--no-banner` | 不打印启动 logo（也可设 `CORTRACE_NO_BANNER=1`；logo 只在终端里显示） |
+
+**线程名映射**：NuttX 的 TCB 在堆上，不在 ELF 里。目标跑起来后，通过常驻的 OpenOCD 读活线程表：
+
+```sh
+cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out tcbmap.txt
+```
+
+它只读 `g_pidhash` 里的活条目（只读内存），并且借用已经常驻的 OpenOCD 会话，不会另起一个 OpenOCD
+去连调试器——后者会把 DWT 配置清掉。
+
+### 4.2 软硬融合模式：硬件 + NuttX 软件 trace
+
+**目标侧**：固件打开 `CONFIG_ARMV7M_NOTE_ITM`（note 走 ITM 刺激端口 1，和 ETM、DWT 共用同一个 TPIU）。
+
+**主机侧**：需要 pynuttx。可以是 pip 装的包，也可以用源码目录：
+
+```sh
+pip install construct tqdm lief==0.16.5 cxxfilt pyelftools protobuf   # nxtrace 的依赖
+export PYNUTTX=/path/to/pynuttx        # 源码目录；pip 装好 pynuttx 的话不需要
+```
+
+然后只多一个 `--fuse`：
+
+```sh
+cortrace capture --fuse --elf nuttx --secs 1 --width 4 --tag demo --tcbmap tcbmap.txt
+```
+
+流程：解码硬件 trace 的同时，一边从同一份抓取里取出 ITM 上的 note 字节流，交给 `nxtrace` 转成软件 trace（与解码并行），
+然后把硬件和软件两侧的线程切换逐个配对，拟合出两个时钟的固定偏移，把软件 trace 平移到硬件时间轴上，拼成一个文件。
+各步骤之间的依赖关系（解码最耗时，nxtrace 的两遍转换在它进行的同时就已经开始）：
+
+```mermaid
+flowchart TD
+    RAW["raw_TAG.bin"] --> DEC["cortrace-decode<br/>最耗时，实测约 12~15 s"]
+    DEC -->|"ITM 字节流写完<br/>(解码早期，不必等解码结束)"| N1["nxtrace 第 1 遍<br/>note → 文本 note_TAG.txt"]
+    DEC -->|"同上"| N2["nxtrace 第 2 遍<br/>note → 软件 trace (note 自己的时钟)"]
+    DEC -->|"解码结束"| RUNS["hwruns_TAG.tsv<br/>hw_TAG.perfetto"]
+    N1 --> ALIGN["对齐：逐个配对硬件/软件的线程切换<br/>得到固定时钟偏移 offset"]
+    RUNS --> ALIGN
+    N2 --> SHIFT["按 offset 平移软件 trace 的时间戳<br/>并重编号 sequence id"]
+    ALIGN --> SHIFT
+    SHIFT --> MERGE["追加到 hw_TAG.perfetto 末尾<br/>改名为 fused_TAG.perfetto"]
+    RUNS --> MERGE
+    ALIGN -.->|"对不上"| FALLBACK["不生成 fused，只保留硬件 trace<br/>(见第 7 节)"]
+```
+
+结束时的对齐摘要：
+
+```
+matched   : 6902/6902 hw switches within +/-30 us of one common offset
+residual  : mean -0.042 us  sd 0.280 us  min -0.873  max +0.693
+fused     : <out-dir>/fused_demo.perfetto
+```
+
+`matched` 是硬件侧线程切换里能和软件 note 配上的数量，实测 6902/6902，残差标准差 0.28 µs。实测端到端约 15 秒，
+`fused_*.perfetto` 约 362 MB（硬件 trace 就地追加 note，不会再复制一份 355 MB；需要同时保留 `hw_*.perfetto`
+时加 `--keep-parts`）。
+
+输出目录里还会有：`notes_<tag>.bin`（原样的 note 字节流）、`note_<tag>.pftrace`（软件 trace，已平移到硬件时间轴）、
+`note_<tag>.txt`（note 文本）、`hwruns_<tag>.tsv`（硬件侧线程切换）、`offset_<tag>.txt`（时钟偏移，纳秒）、
+`nxtrace_<tag>.log`（nxtrace 的错误输出，出问题先看它）。
+
+对已经抓好的 raw 文件，可以单独融合：
+
+```sh
+cortrace fuse --raw raw_demo.bin --elf nuttx --out-dir ~/traces --tag again --tcbmap tcbmap.txt
+```
+
+### 4.3 看结果
+
+- `--open`，或 `cortrace open <文件>`：起一个本机页面把文件交给 ui.perfetto.dev（trace 数据只走本机，不上传）。
+- 也可以直接把 `.perfetto` 文件拖进 https://ui.perfetto.dev 。
+- 融合文件里，硬件轨道（调用栈、`Threads` 线程泳道）和软件轨道（调度、线程）在同一条时间轴上，可以直接对照。
+
+### 4.4 其他命令
+
+| 命令 | 作用 |
+|------|------|
+| `cortrace decode …` | 直接调用 `cortrace-decode`，参数原样透传（离线分析已 deframe 的数据、`--edges` 校验等） |
+| `cortrace align --hw-runs … --note …` | 单独拟合硬件和 note 的时钟偏移 |
+| `cortrace fpga ctrl set-width 4` | 设置 FPGA 的 TPIU 位宽并重新武装；还有 `rearm`、`set-bitlen`、`stream-selftest`、`iddr-prbs` |
+| `cortrace fpga health [ip] [--check {health,ddr3,blackbox}] [--reset]` | 读 FPGA 的调试寄存器并给出诊断 |
+| `cortrace fpga net` | ARP 探测 FPGA 接在哪个网口（需要 `CAP_NET_RAW`） |
+
+## 5. 网页点击模式
+
+```sh
+cortrace serve --elf fw.elf --iface <nic> --secs 1 --width 4 [--fuse] [--tcbmap tcbmap.txt]
+```
+
+它在本机起一个"假 traced"，浏览器里的 Perfetto 把它当成一个可以录制的目标。点 Start 时，cortrace 自己跑一遍
+`capture`（加 `--fuse` 就是融合模式），解码完把结果在**同一个页面**里显示出来。
+
+整个交互过程：
+
+```mermaid
+sequenceDiagram
+    actor U as 你
+    participant UI as ui.perfetto.dev
+    participant R as cortrace serve<br/>(WebSocket 中继 + 假 traced)
+    participant C as 采集流水线<br/>(capture / capture --fuse)
+    U->>UI: Record new trace，连接 127.0.0.1:8037
+    UI->>R: WebSocket 握手
+    R-->>UI: 101 Switching Protocols<br/>(Origin 不在白名单则 403)
+    U->>UI: 点 Start
+    UI->>R: EnableTracing
+    R->>C: 开始一次采集 (--secs 秒)
+    Note over R,C: EnableTracing 的应答要等采集结束才发
+    C->>C: 设位宽 → 抓 UDP → 解码 (→ 融合)
+    C-->>R: 结果 .perfetto
+    R-->>UI: EnableTracing 应答 (录制结束)
+    UI->>R: ReadBuffers
+    R-->>UI: 分片返回 TracePacket
+    UI-->>U: 页面显示 trace
+```
+
+步骤：
+
+1. 运行上面的命令，保持它开着。启动后会打印
+   `open https://ui.perfetto.dev -> Record new trace -> Linux -> WebSocket 127.0.0.1:8037, then press Start`。
+2. 浏览器打开 https://ui.perfetto.dev ，左侧选 **Record new trace**。
+3. 目标选 **Linux system**，连接方式选 **WebSocket**，地址 `127.0.0.1:8037`（默认端口，可用 `--port` 改）。
+4. 点 **Start recording**。等几十秒（抓取 1 秒 + 解码；融合模式再多一点），页面会自动切到解码后的 trace。
+
+要点：
+
+- **录制时长由 `--secs` 决定**，不是 UI 里设置的时长。UI 里的时长只影响它自己的计时，不影响抓多久。
+- 同一时刻只允许一个采集；上一次还没结束时再点 Start 会被忽略。
+- 每次点 Start 都会在输出目录里生成一套新文件（文件名带时间戳），空间不够会直接拒绝，见第 6 节。
+- 本机回环监听，且只接受来自 `ui.perfetto.dev` 和 `localhost` 的网页（Origin 检查），别的网页连不上，
+  避免随便一个网页就能触发抓取。要放行别的来源用 `--allow-origin`。
+- 端口 8037 被别的程序占着（比如另一个 `nxtrace traced`）时 `serve` 会起不来，先停掉那个，或者换 `--port`。
+
+> 已验证的部分：WebSocket 握手、来源（Origin）校验、点 Start 后的服务端流程（见 deb 的冒烟测试和
+> `python/tests`）。浏览器里的菜单文字会随 Perfetto UI 的版本略有不同，以实际界面为准。
+
+## 6. 磁盘与限制
+
+1 秒抓取的数据量：原始 75 MB + 解码产物约 355 MB，合计约 450 MB（融合模式因为就地追加，和独立模式差不多）。
+
+- 开始抓取或解码前，cortrace 会按"抓取 ≈ 原始×6、解码 ≈ 原始×5"估算需要的空间，不够直接报错并给出数字，
+  不会写到一半才失败。
+- 抓取超过 5 秒需要加 `--allow-long`。再长的 trace Perfetto 网页也很难加载。
+- cortrace **不会自动删除**任何文件，目录由你管理。
+
+## 7. 排错
+
+抓完发现结果不对时，按这个顺序查（先看抓到没有，再看质量，再看线程，最后看融合）：
+
+```mermaid
+flowchart TD
+    S["抓完了，结果不对？"] --> Q1{"raw 文件有数据吗？<br/>(1 秒约 75 MB)"}
+    Q1 -->|"0 字节"| A1["检查网口 HOST_IP、5555 端口占用<br/>cortrace fpga ctrl rearm"]
+    Q1 -->|"有"| Q2{"解码摘要<br/>stream health 是 clean 吗？"}
+    Q2 -->|"lost-sync / overflow"| A2["ETM 在片上溢出：<br/>降 CPU 频率或减少 note"]
+    Q2 -->|"clean"| Q3{"Threads 泳道里<br/>有线程切换吗？"}
+    Q3 -->|"没有"| A3["重启常驻 OpenOCD 会话重新武装"]
+    Q3 -->|"有"| Q4{"融合模式：<br/>生成了 fused 吗？"}
+    Q4 -->|"没有 / 报 nxtrace failed"| A4["看 nxtrace_TAG.log；<br/>看 itm notes 里有没有 OVERFLOW"]
+    Q4 -->|"有"| OK["结果可信<br/>matched 应接近全部"]
+```
+
+具体的现象和处理：
+
+| 现象 | 原因 / 处理 |
+|------|-------------|
+| `--out-dir is required` | 没指定输出目录：加 `--out-dir`，或 `export CORTRACE_OUT_DIR=…` |
+| `capture NIC not given` | 没指定网口：加 `--iface`，或 `export CORTRACE_IFACE=…`（用 `--raw-in` 时不需要） |
+| `not enough free space in …` | 输出目录所在磁盘放不下，按提示换目录或清理 |
+| `--secs … is longer than 5 s` | 确实要抓更长就加 `--allow-long` |
+| `cortrace-grab failed`，或抓到 0 字节 | 网口没配 `<HOST_IP>`（见第 2 节）；或者 5555 端口被上一次没退出的抓取占着：`fuser -k 5555/udp` |
+| 解码摘要里 `lost-sync` / `overflow` 不为 0 | ETM 在片上溢出：降低 CPU 频率、关掉不需要的 note（syscall/heap），或降低 trace 量。融合模式下 ITM 的 note 也占 TPIU 带宽 |
+| 线程名都是 `tcb@0x…` | 没给 `--tcbmap`；用 `cortrace tcbmap` 生成（需要调试器的 OpenOCD 常驻） |
+| `nxtrace failed … Last lines of nxtrace_<tag>.log` | pynuttx 或它的依赖没装好（常见是缺 `protobuf`）；报错里带了日志尾部 |
+| `nxtrace not found` | 没装 pynuttx 且没指定：`pip install` 它，或 `--pynuttx DIR` / `export PYNUTTX=…` |
+| `no note bytes on ITM port 1` | 固件没开 `CONFIG_ARMV7M_NOTE_ITM`，或 ITM 没使能（调试器没武装） |
+| `clock alignment failed: no fused file` | 硬件和软件的线程切换序列对不上（丢了 note）。看 `itm notes … OVERFLOW`，降低 note 量后重抓；此时只产出硬件 trace |
+| `cortrace fpga health` 报 TRACECLK 无活动 / DISCONTINUOUS | 这是它读寄存器那一刻目标没在输出 trace 时的诊断，文字里的"根因"推断偏悲观；**抓取质量以解码摘要的 `stream health … clean` 为准** |
+| 浏览器连不上 / 连上被拒 | 看 `serve` 的日志：`refusing origin` 说明来源不在白名单；端口被占用见第 5 节 |
+| 解码出的 `Threads` 泳道为空 / 没有线程切换 | 调试器的常驻会话退出了，或目标被复位过，DWT 配置没了：重新启动常驻 OpenOCD 会话（它会复位目标并重新武装，日志里能看到 `armed`），再抓 |
+
+## 8. 命令速查
+
+```sh
+sudo apt install ./cortrace_*_amd64.deb                       # 安装
+export CORTRACE_OUT_DIR=~/traces CORTRACE_IFACE=<nic>          # 一次性设置
+cortrace capture --elf fw.elf --secs 1 --width 4 --open        # 独立模式
+cortrace capture --fuse --elf nuttx --secs 1 --tcbmap m.txt    # 融合模式
+cortrace serve --elf nuttx --fuse --tcbmap m.txt               # 网页点击（浏览器里点 Start）
+cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out m.txt  # 线程名映射
+cortrace --help                                                # 全部命令
+```
