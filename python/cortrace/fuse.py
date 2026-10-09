@@ -219,6 +219,15 @@ def nxtrace_commands(a, paths):
     return dump, pftrace
 
 
+def tail_lines(path, count=12):
+    """Last `count` lines of a text file (empty string if unreadable)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-count:])
+    except OSError:
+        return ""
+
+
 def main(argv=None):
     a = parse_args(argv)
     if not os.path.isfile(a.raw):
@@ -235,6 +244,7 @@ def main(argv=None):
             ("note_raw", "note_{tag}.raw.pftrace"),
             ("note_pf", "note_{tag}.pftrace"),
             ("note_txt", "note_{tag}.txt"),
+            ("note_log", "nxtrace_{tag}.log"),
             ("runs", "hwruns_{tag}.tsv"),
             ("offset", "offset_{tag}.txt"),
             ("fused", "fused_{tag}.perfetto"),
@@ -257,23 +267,29 @@ def main(argv=None):
         decode the notes (two nxtrace passes) while the ETM decode still runs."""
         dump, pftrace = nxtrace_commands(a, paths)
         txt = open(paths["note_txt"], "w", encoding="utf-8")
+        log = open(paths["note_log"], "w", encoding="utf-8")
         note_jobs.append(
             (subprocess.Popen(dump, cwd=a.pynuttx or None, env=env, stdout=txt,
-                              stderr=subprocess.DEVNULL), txt)
+                              stderr=log), txt)
         )  # fmt: skip
         note_jobs.append(
             (subprocess.Popen(pftrace, cwd=a.pynuttx or None, env=env,
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL), None)
+                              stdout=subprocess.DEVNULL, stderr=log), log)
         )  # fmt: skip
 
     proc, pump_thread = start_decode(decode_command(a, paths, syms), start_note_jobs)
     returncode = proc.wait()
     pump_thread.join()
-    for job, txt in note_jobs:
-        job.wait()
-        if txt:
-            txt.close()
+    failed = 0
+    for job, handle in note_jobs:
+        failed = failed or job.wait()
+        handle.close()
+    if failed:
+        sys.exit(
+            f"nxtrace failed (exit {failed}); is pynuttx installed with its "
+            f"dependencies? Last lines of {paths['note_log']}:\n"
+            + tail_lines(paths["note_log"])
+        )
     if returncode or not os.path.isfile(paths["notes_bin"]):
         sys.exit("decode failed")
     if os.path.getsize(paths["notes_bin"]) == 0:

@@ -305,3 +305,39 @@ def test_nxtrace_commands_use_freq_and_pid_names(tmp_path):
     assert pftrace[-4:] == ["-o", "raw.pf", "file", "n.bin"]
     assert "--pid-names" in dump and "--pid-names" in pftrace
     assert dump[dump.index("--freq") + 1] == "150000000"
+
+
+def test_nxtrace_failure_is_reported_with_its_log(monkeypatch, tmp_path):
+    """A missing nxtrace dependency used to end as 'nothing to compare'; the
+    cause (nxtrace's stderr) must reach the user."""
+
+    class FailingJob(FakeJob):
+        def __init__(self, stderr):
+            super().__init__()
+            stderr.write("ModuleNotFoundError: No module named 'google'\n")
+            stderr.flush()
+
+        def wait(self):
+            return 1
+
+    base = make_popen(tmp_path, [])
+
+    def popen(cmd, **kw):
+        if "--itm-note-out" in cmd:
+            return base(cmd, **kw)
+        return FailingJob(kw["stderr"])
+
+    monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
+    monkeypatch.setattr(cf.subprocess, "Popen", popen)
+    with pytest.raises(SystemExit) as e:
+        cf.main(base_args(tmp_path))
+    message = str(e.value)
+    assert "nxtrace failed" in message and "No module named 'google'" in message
+    assert str(tmp_path / "nxtrace_t.log") in message
+
+
+def test_tail_lines(tmp_path):
+    f = tmp_path / "log"
+    f.write_text("".join(f"line{i}\n" for i in range(30)), encoding="utf-8")
+    assert cf.tail_lines(str(f), 2) == "line28\nline29\n"
+    assert cf.tail_lines(str(tmp_path / "missing")) == ""
