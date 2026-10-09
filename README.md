@@ -104,3 +104,17 @@ docs/               设计文档（架构、Perfetto 直连/融合/Record 桥…
 ## 许可证
 
 MIT © 2026 VIFEX（见 [`LICENSE`](LICENSE)）。
+
+## NuttX 软硬融合（`scripts/cortrace_fuse.py`）
+
+一份原始并口抓取（ETM + DWT + ITM 同一个 TPIU）→ 硬件 Perfetto、NuttX note Perfetto、融合文件。
+本仓库只管"拿到字节之后"的解析；抓取由前端负责（例如 cortrace-fpga 的 `itm_capture.py`）。
+
+```sh
+export PYNUTTX=/path/to/pynuttx          # 提供 nxtrace 包
+scripts/cortrace_fuse.py --raw raw.bin --elf nuttx --tcbmap tcbmap.txt --out-dir perftrace
+```
+
+- `scripts/nx_tcbmap.py`：从常驻 OpenOCD（`--telnet`）读活线程的 pid → 名字映射。
+- `scripts/align_check.py`：硬件与 note 的线程切换逐个配对，拟合时钟偏移。
+- 路径一律用参数或环境变量（`--pynuttx`/`$PYNUTTX`、`--cortrace-decode`/`$CORTRACE_DECODE`），没有写死的本机路径。

@@ -114,3 +114,18 @@ docs/               design docs (architecture, Perfetto bridges, fusion, ...)
 ## License
 
 MIT © 2026 VIFEX (see [`LICENSE`](LICENSE)).
+
+## NuttX hardware + software fusion (`scripts/cortrace_fuse.py`)
+
+One raw parallel-trace capture (ETM + DWT + ITM through one TPIU) becomes a hardware Perfetto
+trace, a NuttX note Perfetto trace and a fused file. This repo only interprets bytes; a front end
+captures them (e.g. cortrace-fpga's `itm_capture.py`).
+
+```sh
+export PYNUTTX=/path/to/pynuttx          # provides the nxtrace package
+scripts/cortrace_fuse.py --raw raw.bin --elf nuttx --tcbmap tcbmap.txt --out-dir perftrace
+```
+
+- `scripts/nx_tcbmap.py`: read the live pid -> name map through a resident OpenOCD (`--telnet`).
+- `scripts/align_check.py`: pair hardware and note thread switches one by one and fit the clock offset.
+- Paths come from options or environment (`--pynuttx`/`$PYNUTTX`, `--cortrace-decode`/`$CORTRACE_DECODE`); nothing is hard-coded.
