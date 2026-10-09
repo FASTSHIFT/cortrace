@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
-"""align_check.py -- do the NuttX note trace and the hardware (ETM+DWT) trace
+"""align -- do the NuttX note trace and the hardware (ETM+DWT) trace
 agree on WHEN each thread switch happened?
 
 Inputs (both recorded over the same window, see nxtrace `--companion-cmd`):
-  --hw    Perfetto file written by cortrace-decode (has a "Threads" track whose
-          slices are thread runs; a run's start is a context switch into it).
+  --hw-runs  TSV written by `cortrace-decode --nx-runs-out` ("<tick>\t<name>" per
+             thread run; a run's start is a context switch into that thread).
   --note  text from `python -m nxtrace capture --format dump ...`, lines like
           "[22079159426] cpu=0 pid=2 type=3" (type 3 = NOTE_RESUME = switch in).
 
@@ -21,24 +20,9 @@ when its ring is full), hence the per-burst fit.
 """
 
 import argparse
-import importlib.util
-import os
 import re
 import statistics
 import sys
-
-
-def default_pb2():
-    """perfetto_trace_pb2.py inside the pynuttx checkout named by $PYNUTTX."""
-    root = os.environ.get("PYNUTTX")
-    return os.path.join(root, "nxtrace", "perfetto_trace_pb2.py") if root else None
-
-
-def load_pb2(path):
-    spec = importlib.util.spec_from_file_location("perfetto_trace_pb2", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def load_tcbmap(path):
@@ -64,35 +48,6 @@ def hw_switches_tsv(path, name2pid):
             tick, _, name = ln.rstrip("\n").partition("\t")
             m = re.search(r"\(pid (\d+)\)", name)
             out.append((int(tick), int(m.group(1)) if m else name2pid.get(name, name)))
-    out.sort(key=lambda x: x[0])
-    return out
-
-
-def hw_switches(perfetto_path, pb2, name2pid, track_name="Threads"):
-    """[(ns, pid_or_name)] thread-run starts from the cortrace 'Threads' track."""
-    tr = pb2.Trace()
-    tr.ParseFromString(open(perfetto_path, "rb").read())
-    uuids = {}
-    for p in tr.packet:
-        if p.HasField("track_descriptor"):
-            td = p.track_descriptor
-            uuids[td.uuid] = td.name
-    want = {u for u, n in uuids.items() if n == track_name}
-    if not want:
-        sys.exit(
-            f"no '{track_name}' track in {perfetto_path}; tracks: "
-            f"{sorted(set(uuids.values()))[:12]}"
-        )
-    out = []
-    for p in tr.packet:
-        if not p.HasField("track_event"):
-            continue
-        te = p.track_event
-        if te.track_uuid in want and te.type == te.TYPE_SLICE_BEGIN:
-            # cortrace names runs "<thread> (pid N)"; fall back to the tcbmap.
-            m = re.search(r"\(pid (\d+)\)", te.name)
-            pid = int(m.group(1)) if m else name2pid.get(te.name, te.name)
-            out.append((p.timestamp, pid))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -170,19 +125,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--hw", help="cortrace Perfetto file (slow for big captures)")
     ap.add_argument(
-        "--hw-runs", help="cortrace-decode --nx-runs-out TSV (fast; preferred)"
+        "--hw-runs", required=True, help="cortrace-decode --nx-runs-out TSV"
     )
     ap.add_argument("--note", required=True, help="nxtrace --format dump text")
     ap.add_argument(
         "--tcbmap", default=None, help="nx_tcbmap.py output (thread name -> pid)"
-    )
-    ap.add_argument(
-        "--pb2",
-        default=default_pb2(),
-        help="path to pynuttx nxtrace/perfetto_trace_pb2.py (only for --hw; "
-        "default: $PYNUTTX/nxtrace/perfetto_trace_pb2.py)",
     )
     ap.add_argument(
         "--resume-type", type=int, default=3, help="note type of NOTE_RESUME"
@@ -199,14 +147,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     name2pid = load_tcbmap(a.tcbmap)
-    if a.hw_runs:
-        hw = hw_switches_tsv(a.hw_runs, name2pid)
-    elif a.hw:
-        if not a.pb2:
-            sys.exit("--hw needs --pb2 (or $PYNUTTX pointing at the pynuttx checkout)")
-        hw = hw_switches(a.hw, load_pb2(a.pb2), name2pid)
-    else:
-        sys.exit("give --hw-runs or --hw")
+    hw = hw_switches_tsv(a.hw_runs, name2pid)
     notes = note_switches(a.note, a.resume_type)
     print(f"hardware switches: {len(hw)}   note switches: {len(notes)}")
     if not hw or not notes:

@@ -18,9 +18,10 @@ and DWT. A single capture therefore carries all three on one time base:
 This tool does NOT capture: give it a raw file from whatever front end you
 use (an FPGA streamer, a probe, ...). Outputs land in --out-dir.
 
-usage: cortrace_fuse.py --raw raw.bin --elf nuttx --pynuttx DIR [--tcbmap map.txt]
-  --pynuttx defaults to $PYNUTTX (a pynuttx checkout providing `nxtrace`),
-  --cortrace-decode to $CORTRACE_DECODE, else <repo>/build-rel/cortrace-decode.
+usage: cortrace fuse --raw raw.bin --elf nuttx [--tcbmap map.txt] [--pynuttx DIR]
+  nxtrace is taken from the installed pynuttx package, or from --pynuttx /
+  $PYNUTTX (a pynuttx checkout). --cortrace-decode defaults to $CORTRACE_DECODE,
+  else cortrace-decode on PATH.
 """
 
 import argparse
@@ -32,22 +33,16 @@ import tempfile
 import threading
 import time
 
+from . import wire
 from ._paths import find_binary
 from .align import main as align_main
 from .perfetto_open import main as perfetto_open_main
 
 CHUNK = 16 * 1024 * 1024
+SEQ_ID_OFFSET = 1000  # note-trace packet sequence ids are raised by this
 
 
-def load_pb2(pynuttx):
-    path = os.path.join(pynuttx, "nxtrace", "perfetto_trace_pb2.py")
-    spec = importlib.util.spec_from_file_location("perfetto_trace_pb2", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def fuse(hw, note_pf, out, pb2=None, pynuttx=None):
+def fuse(hw, note_pf, out):
     """Merge two Perfetto traces into one file.
 
     A Perfetto trace is a sequence of TracePackets, so concatenating files is a
@@ -55,19 +50,11 @@ def fuse(hw, note_pf, out, pb2=None, pynuttx=None):
     a trusted_packet_sequence_id share incremental state, and the note trace's
     trace_config / clock_snapshot / state-clearing packets would otherwise land
     on the same sequence as the millions of hardware track events. The note
-    trace is small, so its sequence ids are remapped (leaving the big hardware
-    file's bytes untouched).
+    trace is small, so its sequence ids are renumbered (leaving the big
+    hardware file's bytes untouched).
     """
-    if pb2 is None:
-        pb2 = load_pb2(pynuttx)
-    trace = pb2.Trace()
     with open(note_pf, "rb") as f:
-        trace.ParseFromString(f.read())
-    remapped = 0
-    for pkt in trace.packet:
-        if pkt.trusted_packet_sequence_id:  # 0 = legacy "no sequence", leave alone
-            pkt.trusted_packet_sequence_id += 1000
-            remapped += 1
+        note = wire.rewrite_trace(f.read(), seq_add=SEQ_ID_OFFSET)
     with open(out, "wb") as dst:
         with open(hw, "rb") as src:
             while True:
@@ -75,46 +62,15 @@ def fuse(hw, note_pf, out, pb2=None, pynuttx=None):
                 if not chunk:
                     break
                 dst.write(chunk)
-        dst.write(trace.SerializeToString())
-    return remapped
+        dst.write(note)
 
 
-TIMESTAMP_FIELDS = frozenset({"timestamp", "last_read_event_timestamp"})
-
-
-def _is_repeated(field):
-    if hasattr(field, "is_repeated"):
-        return field.is_repeated
-    return field.label == field.LABEL_REPEATED
-
-
-def shift_timestamps(msg, offset_ns):
-    """Add offset_ns to every absolute timestamp in a protobuf message tree.
-
-    Same result as running nxtrace with --ts-offset-ns (byte-identical on a real
-    note trace), but without re-parsing the notes: nxtrace runs once, in
-    parallel with the hardware decode, and the offset (known only after the
-    decode) is applied afterwards.
-    """
-    for field, value in msg.ListFields():
-        if field.type == field.TYPE_MESSAGE:
-            for sub in value if _is_repeated(field) else [value]:
-                shift_timestamps(sub, offset_ns)
-        elif field.name in TIMESTAMP_FIELDS:
-            setattr(msg, field.name, value + offset_ns)
-
-
-def shift_trace_file(src, dst, offset_ns, pb2=None, pynuttx=None):
+def shift_trace_file(src, dst, offset_ns):
     """Write src (a Perfetto trace) to dst with all timestamps moved by offset_ns."""
-    if pb2 is None:
-        pb2 = load_pb2(pynuttx)
-    trace = pb2.Trace()
     with open(src, "rb") as f:
-        trace.ParseFromString(f.read())
-    if offset_ns:
-        shift_timestamps(trace, offset_ns)
+        data = f.read()
     with open(dst, "wb") as f:
-        f.write(trace.SerializeToString())
+        f.write(wire.rewrite_trace(data, offset_ns=offset_ns))
 
 
 def parse_args(argv=None):
@@ -126,7 +82,8 @@ def parse_args(argv=None):
     ap.add_argument(
         "--pynuttx",
         default=os.environ.get("PYNUTTX"),
-        help="pynuttx checkout providing the nxtrace package (default: $PYNUTTX)",
+        help="pynuttx checkout providing nxtrace (default: $PYNUTTX; not needed "
+        "when pynuttx is pip-installed)",
     )
     ap.add_argument(
         "--cortrace-decode",
@@ -158,10 +115,13 @@ def parse_args(argv=None):
         help="do not write the merged fused_<tag>.perfetto",
     )
     a = ap.parse_args(argv)
-    if not a.pynuttx:
-        ap.error("pynuttx checkout not given: pass --pynuttx DIR or set $PYNUTTX")
-    # nxtrace runs with cwd=pynuttx, so every path it sees must be absolute.
-    a.pynuttx = os.path.abspath(a.pynuttx)
+    if a.pynuttx:
+        a.pynuttx = os.path.abspath(a.pynuttx)
+    elif importlib.util.find_spec("nxtrace") is None:
+        ap.error(
+            "nxtrace not found: pip install pynuttx, or pass --pynuttx DIR / set $PYNUTTX"
+        )
+    # nxtrace may run with cwd=pynuttx, so every path it sees must be absolute.
     a.raw = os.path.abspath(a.raw)
     a.elf = os.path.abspath(a.elf)
     a.out_dir = os.path.abspath(a.out_dir)
@@ -260,10 +220,9 @@ def main(argv=None):
     with open(syms, "w", encoding="utf-8") as f:
         subprocess.run([a.nm, "-n", a.elf], stdout=f, check=True)
 
-    env = dict(
-        os.environ,
-        PYTHONPATH=a.pynuttx + os.pathsep + os.environ.get("PYTHONPATH", ""),
-    )
+    env = dict(os.environ)
+    if a.pynuttx:
+        env["PYTHONPATH"] = a.pynuttx + os.pathsep + env.get("PYTHONPATH", "")
     if os.path.exists(paths["note_raw"]):
         os.unlink(paths["note_raw"])  # nxtrace appends to an existing output file
     note_jobs = []
@@ -274,11 +233,11 @@ def main(argv=None):
         dump, pftrace = nxtrace_commands(a, paths)
         txt = open(paths["note_txt"], "w", encoding="utf-8")
         note_jobs.append(
-            (subprocess.Popen(dump, cwd=a.pynuttx, env=env, stdout=txt,
+            (subprocess.Popen(dump, cwd=a.pynuttx or None, env=env, stdout=txt,
                               stderr=subprocess.DEVNULL), txt)
         )  # fmt: skip
         note_jobs.append(
-            (subprocess.Popen(pftrace, cwd=a.pynuttx, env=env,
+            (subprocess.Popen(pftrace, cwd=a.pynuttx or None, env=env,
                               stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL), None)
         )  # fmt: skip
@@ -320,16 +279,14 @@ def main(argv=None):
     # (note_ns - offset = hw_ns).
     if not os.path.isfile(paths["note_raw"]):
         sys.exit("nxtrace produced no note trace")
-    shift_trace_file(
-        paths["note_raw"], paths["note_pf"], -(offset or 0), pynuttx=a.pynuttx
-    )
+    shift_trace_file(paths["note_raw"], paths["note_pf"], -(offset or 0))
     os.unlink(paths["note_raw"])
 
     # One file with both: concatenation is a valid Perfetto merge.
     fused = None
     if offset is not None and not a.no_fuse:
         fused = paths["fused"]
-        fuse(paths["hw"], paths["note_pf"], fused, pynuttx=a.pynuttx)
+        fuse(paths["hw"], paths["note_pf"], fused)
 
     note_axis = "(on the hardware time axis)" if offset is not None else "(UNALIGNED)"
     print(f"\nhardware : {paths['hw']}\nnote     : {paths['note_pf']}  {note_axis}")

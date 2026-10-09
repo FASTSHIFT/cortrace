@@ -1,51 +1,24 @@
 """Tests for cortrace_fuse: Perfetto merge, argument handling, command line."""
 
-import json
-import types
-
 import pytest
+import wirehelp as wh
 
 from cortrace import fuse as cf
 
 
-class FakePacket:
-    def __init__(self, seq):
-        self.trusted_packet_sequence_id = seq
-
-
-class FakeTrace:
-    """Stand-in for perfetto_trace_pb2.Trace: JSON on the wire, one field."""
-
-    def __init__(self):
-        self.packet = []
-
-    def ParseFromString(self, data):
-        self.packet = [FakePacket(s) for s in json.loads(data)]
-
-    def SerializeToString(self):
-        return json.dumps([p.trusted_packet_sequence_id for p in self.packet]).encode()
-
-    def ListFields(self):
-        return []
-
-
-FAKE_PB2 = types.SimpleNamespace(Trace=FakeTrace)
-
-
-def test_fuse_appends_remapped_note_trace_and_keeps_hw_bytes(tmp_path):
+def test_fuse_appends_renumbered_note_trace_and_keeps_hw_bytes(tmp_path):
     hw = tmp_path / "hw.perfetto"
     hw_bytes = b"\x00\x01hardware-bytes\xff" * 1000
     hw.write_bytes(hw_bytes)
     note = tmp_path / "note.pftrace"
-    note.write_bytes(json.dumps([1, 2, 0, 2]).encode())
+    note.write_bytes(wh.trace(wh.packet(seq=1), wh.packet(seq=2), wh.packet(seq=0)))
     out = tmp_path / "fused.perfetto"
 
-    remapped = cf.fuse(str(hw), str(note), str(out), pb2=FAKE_PB2)
+    cf.fuse(str(hw), str(note), str(out))
 
     data = out.read_bytes()
-    assert remapped == 3  # sequence id 0 (legacy) is left alone
     assert data.startswith(hw_bytes)  # hardware file is copied untouched
-    assert json.loads(data[len(hw_bytes) :]) == [1001, 1002, 0, 1002]
+    assert [p["seq"] for p in wh.parse(data[len(hw_bytes) :])] == [1001, 1002, 0]
 
 
 def test_fuse_streams_large_hw_file(tmp_path):
@@ -53,14 +26,31 @@ def test_fuse_streams_large_hw_file(tmp_path):
     size = cf.CHUNK + 1024 * 1024  # more than one chunk
     hw.write_bytes(b"\xab" * size)
     note = tmp_path / "note.pftrace"
-    note.write_bytes(b"[]")
+    note.write_bytes(b"")
     out = tmp_path / "fused.perfetto"
-    cf.fuse(str(hw), str(note), str(out), pb2=FAKE_PB2)
-    assert out.stat().st_size == size + len(b"[]")
+    cf.fuse(str(hw), str(note), str(out))
+    assert out.stat().st_size == size
 
 
-def test_missing_pynuttx_is_an_argument_error(monkeypatch, capsys):
+def test_shift_trace_file_moves_timestamps(tmp_path):
+    src = tmp_path / "in.pf"
+    src.write_bytes(wh.trace(wh.packet(ts=5000, events=[7000])))
+    dst = tmp_path / "out.pf"
+    cf.shift_trace_file(str(src), str(dst), -1000)
+    p = wh.parse(dst.read_bytes())[0]
+    assert p["ts"] == 4000 and p["events"] == [6000]
+
+
+def test_installed_nxtrace_needs_no_pynuttx_option(monkeypatch):
     monkeypatch.delenv("PYNUTTX", raising=False)
+    monkeypatch.setattr(cf.importlib.util, "find_spec", lambda _n: object())
+    a = cf.parse_args(["--raw", "r.bin", "--elf", "x.elf"])
+    assert a.pynuttx is None
+
+
+def test_missing_nxtrace_is_an_argument_error(monkeypatch, capsys):
+    monkeypatch.delenv("PYNUTTX", raising=False)
+    monkeypatch.setattr(cf.importlib.util, "find_spec", lambda _n: None)
     with pytest.raises(SystemExit) as e:
         cf.parse_args(["--raw", "r.bin", "--elf", "x.elf"])
     assert e.value.code == 2
@@ -122,7 +112,9 @@ def make_popen(tmp_path, started, decode_rc=0, notes=b"\x01\x02"):
             return FakeDecodeProc(lines, decode_rc)
         started.append(list(cmd))
         if "-o" in cmd:  # nxtrace capture -> note perfetto at the note clock
-            (tmp_path / "note_t.raw.pftrace").write_bytes(b"[1]")
+            (tmp_path / "note_t.raw.pftrace").write_bytes(
+                wh.trace(wh.packet(ts=5000, seq=1))
+            )
         return FakeJob()
 
     return popen
@@ -175,7 +167,6 @@ def test_note_passes_are_launched_from_the_notes_line(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
     monkeypatch.setattr(cf.subprocess, "Popen", popen)
-    monkeypatch.setattr(cf, "load_pb2", lambda _p: FAKE_PB2)
 
     def fake_align(_argv):
         (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
@@ -188,11 +179,8 @@ def test_note_passes_are_launched_from_the_notes_line(monkeypatch, tmp_path):
 
 
 def test_full_pipeline_shifts_note_trace_and_fuses(monkeypatch, tmp_path):
-    shifts = []
     monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
     monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
-    monkeypatch.setattr(cf, "load_pb2", lambda _p: FAKE_PB2)
-    monkeypatch.setattr(cf, "shift_timestamps", lambda m, off: shifts.append(off))
     aligned, opened = [], []
 
     def fake_align(argv):
@@ -204,22 +192,24 @@ def test_full_pipeline_shifts_note_trace_and_fuses(monkeypatch, tmp_path):
     monkeypatch.setattr(cf, "perfetto_open_main", opened.append)
     rc = cf.main(base_args(tmp_path, "--tcbmap", "map.txt", "--open"))
     assert rc == 0
-    assert shifts == [-1000]  # note_ns - offset = hw_ns
-    assert (tmp_path / "fused_t.perfetto").read_bytes() == b"HW" + b"[1001]"
+    fused = (tmp_path / "fused_t.perfetto").read_bytes()
+    assert fused.startswith(b"HW")
+    packet = wh.parse(fused[2:])[0]
+    assert packet["ts"] == 5000 - 1000  # note_ns - offset = hw_ns
+    assert packet["seq"] == 1001
+    assert wh.parse((tmp_path / "note_t.pftrace").read_bytes())[0]["ts"] == 4000
     assert not (tmp_path / "note_t.raw.pftrace").exists()  # temp file removed
     assert "--tcbmap" in aligned[0] and "--hw-runs" in aligned[0]
     assert opened and opened[0][-1] == "--keep"
 
 
 def test_alignment_failure_leaves_note_trace_unshifted(monkeypatch, tmp_path):
-    shifts = []
     monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
     monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
-    monkeypatch.setattr(cf, "load_pb2", lambda _p: FAKE_PB2)
-    monkeypatch.setattr(cf, "shift_timestamps", lambda m, off: shifts.append(off))
     monkeypatch.setattr(cf, "align_main", lambda _argv: 1)
     cf.main(base_args(tmp_path))
-    assert not shifts  # offset 0: nothing to shift
+    # no offset: the note trace is kept on its own clock
+    assert wh.parse((tmp_path / "note_t.pftrace").read_bytes())[0]["ts"] == 5000
     assert (tmp_path / "note_t.pftrace").exists()
     assert not (tmp_path / "fused_t.perfetto").exists()
 
@@ -248,47 +238,3 @@ def test_nxtrace_commands_use_freq_and_pid_names(tmp_path):
     assert pftrace[-4:] == ["-o", "raw.pf", "file", "n.bin"]
     assert "--pid-names" in dump and "--pid-names" in pftrace
     assert dump[dump.index("--freq") + 1] == "150000000"
-
-
-def test_shift_timestamps_on_a_real_message_tree():
-    # pylint: disable=no-member
-    pytest.importorskip("google.protobuf")
-    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
-
-    fdp = descriptor_pb2.FileDescriptorProto(name="t.proto", package="t")
-    ev = fdp.message_type.add(name="Event")
-    ev.field.add(name="timestamp", number=1, type=4, label=1)
-    ev.field.add(name="pid", number=2, type=4, label=1)
-    pkt = fdp.message_type.add(name="Packet")
-    pkt.field.add(name="timestamp", number=1, type=4, label=1)
-    pkt.field.add(name="last_read_event_timestamp", number=2, type=4, label=1)
-    pkt.field.add(name="event", number=3, type=11, label=3, type_name=".t.Event")
-    pkt.field.add(name="sequence", number=4, type=4, label=1)
-    root = fdp.message_type.add(name="Root")
-    root.field.add(name="packet", number=1, type=11, label=3, type_name=".t.Packet")
-    pool = descriptor_pool.DescriptorPool()
-    pool.Add(fdp)
-    root_cls = message_factory.GetMessageClass(pool.FindMessageTypeByName("t.Root"))
-
-    msg = root_cls()
-    p = msg.packet.add(timestamp=100, last_read_event_timestamp=90, sequence=7)
-    p.event.add(timestamp=10, pid=5)
-    p.event.add(timestamp=20, pid=6)
-    msg.packet.add(sequence=8)  # no timestamp: stays unset
-
-    cf.shift_timestamps(msg, 1000)
-    assert p.timestamp == 1100 and p.last_read_event_timestamp == 1090
-    assert [e.timestamp for e in p.event] == [1010, 1020]
-    assert [e.pid for e in p.event] == [5, 6]  # only timestamps move
-    assert p.sequence == 7
-    assert not msg.packet[1].HasField("timestamp")
-    cf.shift_timestamps(msg, -1000)
-    assert p.timestamp == 100 and [e.timestamp for e in p.event] == [10, 20]
-
-
-def test_shift_trace_file_round_trips_through_pb2(tmp_path):
-    src = tmp_path / "in.pf"
-    src.write_bytes(json.dumps([3, 4]).encode())
-    dst = tmp_path / "out.pf"
-    cf.shift_trace_file(str(src), str(dst), 5, pb2=FAKE_PB2)
-    assert json.loads(dst.read_bytes()) == [3, 4]

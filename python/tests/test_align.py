@@ -1,7 +1,6 @@
 """Unit tests for align_check.py (hw <-> note switch alignment)."""
 
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -136,12 +135,6 @@ def test_main_falls_back_to_global_fit(tmp_path, monkeypatch, capsys):
     assert "unmatched hw" in out
 
 
-def test_main_requires_an_hw_input(tmp_path, monkeypatch):
-    note = write(tmp_path, "note.txt", "[1] cpu=0 pid=0 type=3\n")
-    with pytest.raises(SystemExit):
-        run_main(monkeypatch, ["--note", note])
-
-
 def test_main_nothing_to_compare(tmp_path, monkeypatch):
     runs = write(tmp_path, "runs.tsv", "100\tidle (pid 0)\n")
     note = write(tmp_path, "note.txt", "no notes here\n")
@@ -155,69 +148,8 @@ def test_main_no_common_offset_returns_1(tmp_path, monkeypatch):
     assert run_main(monkeypatch, ["--hw-runs", runs, "--note", note]) == 1
 
 
-def test_default_pb2_follows_pynuttx_env(monkeypatch):
-    monkeypatch.delenv("PYNUTTX", raising=False)
-    assert ac.default_pb2() is None
-    monkeypatch.setenv("PYNUTTX", "/some/pynuttx")
-    assert ac.default_pb2() == "/some/pynuttx/nxtrace/perfetto_trace_pb2.py"
-
-
-def test_main_hw_without_pb2_is_an_error(tmp_path, monkeypatch):
-    monkeypatch.delenv("PYNUTTX", raising=False)
+def test_main_requires_hw_runs(tmp_path, monkeypatch):
     note = write(tmp_path, "note.txt", "[1] cpu=0 pid=0 type=3\n")
     with pytest.raises(SystemExit) as e:
-        run_main(monkeypatch, ["--hw", "x.perfetto", "--note", note])
-    assert "--pb2" in str(e.value)
-
-
-class _Msg:
-    """Tiny protobuf-message stand-in: HasField is true for populated fields."""
-
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-    def HasField(self, name):
-        return name in self.__dict__
-
-
-def _pb2_with(packets):
-    class Trace:
-        TYPE = 1
-
-        def __init__(self):
-            self.packet = []
-
-        def ParseFromString(self, _data):
-            self.packet = packets
-
-    return types.SimpleNamespace(Trace=Trace)
-
-
-def test_hw_switches_reads_threads_track(tmp_path):
-    track = _Msg(track_descriptor=_Msg(uuid=7, name="Threads"))
-    other = _Msg(track_descriptor=_Msg(uuid=8, name="Other"))
-
-    def ev(uuid, name, ts, typ=1):
-        te = _Msg(track_uuid=uuid, type=typ, name=name, TYPE_SLICE_BEGIN=1)
-        return _Msg(track_event=te, timestamp=ts)
-
-    packets = [
-        track,
-        other,
-        ev(7, "a (pid 3)", 200),
-        ev(7, "worker", 100),
-        ev(8, "x (pid 9)", 50),  # wrong track
-        ev(7, "end", 300, typ=2),  # not a slice begin
-    ]
-    f = tmp_path / "hw.perfetto"
-    f.write_bytes(b"")
-    out = ac.hw_switches(str(f), _pb2_with(packets), {"worker": 4})
-    assert out == [(100, 4), (200, 3)]
-
-
-def test_hw_switches_without_threads_track_exits(tmp_path):
-    f = tmp_path / "hw.perfetto"
-    f.write_bytes(b"")
-    pb2 = _pb2_with([_Msg(track_descriptor=_Msg(uuid=1, name="Other"))])
-    with pytest.raises(SystemExit):
-        ac.hw_switches(str(f), pb2, {})
+        run_main(monkeypatch, ["--note", note])
+    assert e.value.code == 2
