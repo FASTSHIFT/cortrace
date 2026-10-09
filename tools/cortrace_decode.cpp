@@ -277,6 +277,10 @@ int main(int argc, char** argv)
         .scan<'g', double>()
         .default_value(0.0)
         .help("TSGEN frequency for --etm-time count->ns (0 = raw counts as ticks)");
+    program.add_argument("--hybrid-time")
+        .flag()
+        .help("wall-clock ETM timestamps (needs --tsgen-hz) interpolated by the CPU cycle count "
+              "(needs --sysclk-hz): TSGEN accuracy over sleeps, cycle resolution in between");
     program.add_argument("--cycle-time")
         .flag()
         .help("use the ETM cycle-count clock (CPU-cycle resolution) as the time base");
@@ -340,6 +344,25 @@ int main(int argc, char** argv)
         .metavar("FILE")
         .help("tcb->name map from the live target (nx_tcbmap.py) for heap TCBs "
               "not in the ELF image (doc §4.3)");
+    program.add_argument("--nx-runs-out")
+        .metavar("runs.tsv")
+        .help("write the thread runs on the final time base as TSV "
+              "(begin_tick, tid, name); small, for checking thread switches against "
+              "another trace without parsing the whole Perfetto file");
+    program.add_argument("--itm-note-port")
+        .metavar("N")
+        .scan<'i', int>()
+        .default_value(1)
+        .help("ITM stimulus port carrying software trace bytes (NuttX notes) in the "
+              "--nx-switch-stream stream (default 1; matches CONFIG_ARMV7M_NOTE_ITM_PORT)");
+    program.add_argument("--itm-note-unwrap")
+        .flag()
+        .help("extend the 32-bit DWT_CYCCNT note timestamps to 64 bits across counter wraps "
+              "(every ~28.6 s at 150 MHz) before writing --itm-note-out");
+    program.add_argument("--itm-note-out")
+        .metavar("notes.bin")
+        .help("write the ITM stimulus-port byte stream (the NuttX note stream) here; "
+              "requires --raw and --nx-switch-stream. Feed it to `nxtrace ... file`.");
     program.add_argument("--log-level")
         .metavar("LVL")
         .default_value(std::string("warn"))
@@ -377,6 +400,7 @@ int main(int argc, char** argv)
     const char* perf_path = perf_opt ? perf_opt->c_str() : nullptr;
     const bool etm_time = program.get<bool>("--etm-time");
     const double tsgen_hz = program.get<double>("--tsgen-hz");
+    const bool hybrid_time = program.get<bool>("--hybrid-time");
     const bool cycle_time = program.get<bool>("--cycle-time");
     const double sysclk_hz = program.get<double>("--sysclk-hz");
     const char* edges_path = edges_opt ? edges_opt->c_str() : nullptr;
@@ -543,6 +567,37 @@ int main(int argc, char** argv)
                 "deframe: raw=%zu B -> etm=%zu B  phase=(parity=%d,order=%d)  "
                 "A-syncs=%d  frames=%zu\n",
                 got, etm_bytes.size(), used_phase.parity, used_phase.order, async_count, frames);
+        }
+
+        if (auto note_out = program.present("--itm-note-out")) {
+            if (!nx_enabled) {
+                std::fprintf(stderr, "error: --itm-note-out needs --nx-switch-stream\n");
+                return 2;
+            }
+            const uint8_t note_port = static_cast<uint8_t>(program.get<int>("--itm-note-port"));
+            ItmStats ist;
+            auto notes = extract_itm_stimulus(dwt_bytes, note_port, &ist);
+            if (program.get<bool>("--itm-note-unwrap")) {
+                NoteUnwrapStats ust;
+                unwrap_note_systime(notes, &ust);
+                std::fprintf(stderr,
+                    "itm notes: unwrapped %zu timestamps, %zu counter wrap(s), %zu byte(s) "
+                    "skipped\n",
+                    ust.notes, ust.wraps, ust.skipped_bytes);
+            }
+            FILE* nf = std::fopen(note_out->c_str(), "wb");
+            if (!nf) {
+                std::fprintf(stderr, "error: cannot write %s\n", note_out->c_str());
+                return 1;
+            }
+            std::fwrite(notes.data(), 1, notes.size(), nf);
+            std::fclose(nf);
+            std::fprintf(stderr,
+                "itm notes: port %u -> %zu B in %zu packets (all sw packets %zu, dwt hw %zu, "
+                "timestamps %zu, OVERFLOW %zu, other %zu%s) -> %s\n",
+                note_port, notes.size(), ist.port_packets, ist.sw_packets, ist.hw_packets,
+                ist.timestamps, ist.overflows, ist.other, ist.truncated ? ", TRUNCATED" : "",
+                note_out->c_str());
         }
 
         if (dump_etm_path) {
@@ -720,7 +775,10 @@ int main(int argc, char** argv)
     if (perf_path) {
         std::vector<SliceEvent> timed;
         const char* base_desc;
-        if (cycle_time) {
+        if (hybrid_time) {
+            timed = apply_hybrid_time(machine.slices(), tsgen_hz, sysclk_hz);
+            base_desc = " (hybrid: ETM timestamp + cycle count, ns)";
+        } else if (cycle_time) {
             timed = apply_cycle_time(machine.slices(), sysclk_hz);
             base_desc = sysclk_hz > 0.0 ? " (cycle count, ns)" : " (cycle count, raw cycles)";
         } else if (etm_time) {
@@ -769,6 +827,16 @@ int main(int argc, char** argv)
             std::vector<SliceEvent> nx_timed = nx_slices;
             for (auto& s : nx_timed)
                 s.tick = tick_for_byte(s.byte_index);
+            if (auto runs_out = program.present("--nx-runs-out")) {
+                if (FILE* rf = std::fopen(runs_out->c_str(), "w")) {
+                    for (const auto& s : nx_timed)
+                        if (s.begin)
+                            std::fprintf(rf, "%llu\t%s\n", static_cast<unsigned long long>(s.tick),
+                                s.name.c_str());
+                    std::fclose(rf);
+                    std::fprintf(stderr, "wrote thread runs -> %s\n", runs_out->c_str());
+                }
+            }
             timed.insert(timed.end(), nx_timed.begin(), nx_timed.end());
             for (const auto& kv : nx_tracks)
                 tracks[kv.first] = kv.second;
