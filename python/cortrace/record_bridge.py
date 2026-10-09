@@ -462,17 +462,14 @@ def build_bridge(a):
     return Bridge(packets=packets, verbose=not a.quiet)
 
 
-def main(argv=None):
-    a = parse_args(argv)
-    bridge = build_bridge(a)
-
-    if os.path.exists(a.sock):
-        os.unlink(a.sock)
+def serve_forever(bridge, sock_path):
+    """Serve the consumer UNIX socket until interrupted."""
+    if os.path.exists(sock_path):
+        os.unlink(sock_path)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(a.sock)
+    srv.bind(sock_path)
     srv.listen(4)
-    print(f"[record-bridge] listening on {a.sock} (Ctrl-C to stop)", file=sys.stderr)
-
+    print(f"[record-bridge] listening on {sock_path} (Ctrl-C to stop)", file=sys.stderr)
     try:
         while True:
             conn, _ = srv.accept()
@@ -484,8 +481,13 @@ def main(argv=None):
         print("\n[record-bridge] stopping", file=sys.stderr)
     finally:
         srv.close()
-        if os.path.exists(a.sock):
-            os.unlink(a.sock)
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+def main(argv=None):
+    a = parse_args(argv)
+    serve_forever(build_bridge(a), a.sock)
     return 0
 
 
