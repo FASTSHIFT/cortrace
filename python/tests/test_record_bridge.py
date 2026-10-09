@@ -402,7 +402,11 @@ def test_build_bridge_r0_missing_trace_exits():
 
 
 def test_build_bridge_r1_has_capture_cb():
-    br = rb.build_bridge(rb.parse_args(["--capture-cmd", "true", "--quiet"]))
+    br = rb.build_bridge(
+        rb.parse_args(
+            ["--capture-cmd", "true", "--capture-out", "/tmp/x.pf", "--quiet"]
+        )
+    )
     assert br.capture_cb is not None
     assert br.packets == []
 
@@ -421,3 +425,11 @@ def test_make_capture_cb_failure_raises(tmp_path):
     cb = rb.make_capture_cb("false", str(out))  # exits non-zero, writes nothing
     with pytest.raises(RuntimeError):
         cb()
+
+
+def test_capture_cmd_requires_an_explicit_capture_out():
+    a = rb.parse_args(["--capture-cmd", "true"])
+    assert a.capture_out is None
+    with pytest.raises(SystemExit) as e:
+        rb.build_bridge(a)
+    assert "--capture-out" in str(e.value)

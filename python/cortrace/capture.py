@@ -22,6 +22,7 @@ import tempfile
 import time
 
 from . import fuse as fuse_mod
+from . import runstore
 from ._paths import find_binary
 from .fpga import ctrl
 from .perfetto_open import main as perfetto_open_main
@@ -40,6 +41,11 @@ def add_capture_options(ap):
         "--iface", default=os.environ.get("CORTRACE_IFACE"), help="capture NIC"
     )
     ap.add_argument("--secs", type=float, default=1.0, help="capture seconds")
+    ap.add_argument(
+        "--allow-long",
+        action="store_true",
+        help=f"allow captures longer than {runstore.MAX_SECS:g} s (~450 MB per second)",
+    )
     ap.add_argument(
         "--width",
         type=int,
@@ -182,12 +188,19 @@ def fuse_args(a, raw, extra):
 
 def run(a, raw_in=None, extra=()):
     """Run the whole pipeline; returns the path of the file to look at."""
-    os.makedirs(a.out_dir, exist_ok=True)
     if raw_in:
         raw = os.path.abspath(raw_in)
         if not os.path.isfile(raw):
             sys.exit(f"--raw-in not found: {raw}")
+        need = runstore.estimate_decode_bytes(os.path.getsize(raw))
+        what = "decoding the capture"
     else:
+        runstore.check_duration(a.secs, a.allow_long)
+        need = runstore.estimate_capture_bytes(a.secs)
+        what = f"a {a.secs:g} s capture and its decode"
+    runstore.require_space(a.out_dir, need, what)
+    os.makedirs(a.out_dir, exist_ok=True)
+    if not raw_in:
         raw = os.path.join(a.out_dir, f"raw_{a.tag}.bin")
         grab(a, raw)
     if a.fuse:

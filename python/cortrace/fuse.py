@@ -33,7 +33,7 @@ import tempfile
 import threading
 import time
 
-from . import wire
+from . import runstore, wire
 from ._paths import find_binary
 from .align import main as align_main
 from .perfetto_open import main as perfetto_open_main
@@ -42,7 +42,7 @@ CHUNK = 16 * 1024 * 1024
 SEQ_ID_OFFSET = 1000  # note-trace packet sequence ids are raised by this
 
 
-def fuse(hw, note_pf, out):
+def fuse(hw, note_pf, out, inplace=False):
     """Merge two Perfetto traces into one file.
 
     A Perfetto trace is a sequence of TracePackets, so concatenating files is a
@@ -52,9 +52,17 @@ def fuse(hw, note_pf, out):
     on the same sequence as the millions of hardware track events. The note
     trace is small, so its sequence ids are renumbered (leaving the big
     hardware file's bytes untouched).
+
+    inplace=True appends the note packets to `hw` and renames it to `out`, so
+    the (often 350+ MB) hardware trace is not copied and not stored twice.
     """
     with open(note_pf, "rb") as f:
         note = wire.rewrite_trace(f.read(), seq_add=SEQ_ID_OFFSET)
+    if inplace:
+        with open(hw, "ab") as dst:
+            dst.write(note)
+        os.replace(hw, out)
+        return
     with open(out, "wb") as dst:
         with open(hw, "rb") as src:
             while True:
@@ -106,7 +114,17 @@ def parse_args(argv=None):
         "--itm-port", type=int, default=1, help="CONFIG_ARMV7M_NOTE_ITM_PORT"
     )
     ap.add_argument("--tcbmap", default=None, help="nx_tcbmap.py output (thread names)")
-    ap.add_argument("--out-dir", default="perftrace")
+    ap.add_argument(
+        "--out-dir",
+        default=os.environ.get("CORTRACE_OUT_DIR"),
+        help="directory for all outputs (required; default: $CORTRACE_OUT_DIR)",
+    )
+    ap.add_argument(
+        "--keep-parts",
+        action="store_true",
+        help="keep hw_<tag>.perfetto next to fused_<tag>.perfetto (costs a second "
+        "copy of the hardware trace)",
+    )
     ap.add_argument("--tag", default=time.strftime("%Y%m%d-%H%M%S"))
     ap.add_argument("--open", action="store_true", help="open the result in Perfetto")
     ap.add_argument(
@@ -115,6 +133,8 @@ def parse_args(argv=None):
         help="do not write the merged fused_<tag>.perfetto",
     )
     a = ap.parse_args(argv)
+    if not a.out_dir:
+        ap.error("--out-dir is required (or set $CORTRACE_OUT_DIR)")
     if a.pynuttx:
         a.pynuttx = os.path.abspath(a.pynuttx)
     elif importlib.util.find_spec("nxtrace") is None:
@@ -201,6 +221,11 @@ def nxtrace_commands(a, paths):
 
 def main(argv=None):
     a = parse_args(argv)
+    if not os.path.isfile(a.raw):
+        sys.exit(f"--raw not found: {a.raw}")
+    runstore.require_space(
+        a.out_dir, runstore.estimate_decode_bytes(os.path.getsize(a.raw)), "the decode"
+    )
     os.makedirs(a.out_dir, exist_ok=True)
     paths = {
         key: os.path.join(a.out_dir, name.format(tag=a.tag))
@@ -286,18 +311,17 @@ def main(argv=None):
     fused = None
     if offset is not None and not a.no_fuse:
         fused = paths["fused"]
-        fuse(paths["hw"], paths["note_pf"], fused)
+        fuse(paths["hw"], paths["note_pf"], fused, inplace=not a.keep_parts)
 
     note_axis = "(on the hardware time axis)" if offset is not None else "(UNALIGNED)"
-    print(f"\nhardware : {paths['hw']}\nnote     : {paths['note_pf']}  {note_axis}")
+    print()
     if fused:
         print(f"fused    : {fused}")
+    if not fused or a.keep_parts:
+        print(f"hardware : {paths['hw']}")
+    print(f"note     : {paths['note_pf']}  {note_axis}")
     print(f"note text: {paths['note_txt']}\nraw notes: {paths['notes_bin']}")
     if a.open:
         for f in [fused] if fused else [paths["hw"], paths["note_pf"]]:
             perfetto_open_main([f, "--keep"])
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

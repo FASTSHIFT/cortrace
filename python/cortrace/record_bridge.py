@@ -409,16 +409,8 @@ def parse_args(argv=None):
     )
     ap.add_argument(
         "--capture-out",
-        default=os.path.abspath(
-            os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..",
-                "..",
-                "perftrace",
-                "record_bridge_live.perfetto",
-            )
-        ),
-        help="R1: path the --capture-cmd writes the .perfetto to",
+        help="R1: path the --capture-cmd writes the .perfetto to (required with "
+        "--capture-cmd; cortrace never picks an output location itself)",
     )
     ap.add_argument("--sock", default=CONSUMER_SOCK, help="UNIX socket path")
     ap.add_argument("--quiet", action="store_true")
@@ -447,6 +439,8 @@ def build_bridge(a):
     """From parsed args, build the Bridge (R0 static packets or R1 capture_cb).
     Raises SystemExit for an invalid R0 invocation. No sockets here (testable)."""
     if a.capture_cmd:
+        if not a.capture_out:
+            raise SystemExit("--capture-cmd needs --capture-out")
         print("[record-bridge] R1 live mode: capture on EnableTracing", file=sys.stderr)
         cb = make_capture_cb(a.capture_cmd, a.capture_out)
         return Bridge(capture_cb=cb, verbose=not a.quiet)

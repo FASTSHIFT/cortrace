@@ -178,3 +178,32 @@ def test_main_prints_result_and_opens(monkeypatch, tmp_path, capsys):
     assert capsys.readouterr().out.strip() == "/x/y.pf" and not opened
     assert capture.main(base + ["--open"]) == 0
     assert opened == [["/x/y.pf", "--keep"]]
+
+
+def test_long_capture_is_refused_without_allow_long(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
+    with pytest.raises(SystemExit) as e:
+        capture.run(args(tmp_path / "o", secs=30.0, fuse=False))
+    assert "--allow-long" in str(e.value)
+
+
+def test_low_disk_stops_a_capture_before_it_starts(monkeypatch, tmp_path):
+    grabbed = []
+    monkeypatch.setattr(capture, "grab", lambda a, raw: grabbed.append(raw))
+    monkeypatch.setattr(capture.runstore, "free_bytes", lambda p: 1)
+    with pytest.raises(SystemExit) as e:
+        capture.run(args(tmp_path / "o", fuse=False))
+    assert "not enough free space" in str(e.value) and not grabbed
+    assert not (tmp_path / "o").exists()  # nothing created
+
+
+def test_decode_of_an_existing_raw_is_sized_from_the_file(monkeypatch, tmp_path):
+    raw = tmp_path / "r.bin"
+    raw.write_bytes(b"x" * 1000)
+    needs = []
+    monkeypatch.setattr(
+        capture.runstore, "require_space", lambda p, need, what: needs.append(need)
+    )
+    monkeypatch.setattr(capture, "decode_hw", lambda a, r: "x.pf")
+    capture.run(args(tmp_path / "o", fuse=False), raw_in=str(raw))
+    assert needs == [1000 * capture.runstore.EXPANSION]
