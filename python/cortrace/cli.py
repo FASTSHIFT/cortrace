@@ -18,6 +18,7 @@ SUMMARIES = {
     "serve": 'Perfetto "Record" target: press Start in the UI to capture and view',
     "fuse": "one raw capture -> hardware trace + NuttX notes on one time axis",
     "align": "fit the clock offset between hardware and note thread switches",
+    "merge": "put Perfetto traces from different producers on one timeline",
     "tcbmap": "dump the live pid -> thread-name map through OpenOCD",
     "open": "open a Perfetto trace in ui.perfetto.dev",
     "fpga": "FPGA streamer tools: ctrl (CSR writes), net (find the link), health",
@@ -65,6 +66,7 @@ COMMANDS = {
     "serve": _lazy("serve"),
     "fuse": _lazy("fuse"),
     "align": _lazy("align"),
+    "merge": _lazy("merge"),
     "tcbmap": _lazy("tcbmap"),
     "open": _lazy("perfetto_open"),
 }
