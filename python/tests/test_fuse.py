@@ -1,58 +1,17 @@
 """Tests for cortrace_fuse: Perfetto merge, argument handling, command line."""
 
+import json
+import tarfile
+
 import pytest
 import wirehelp as wh
 
 from cortrace import fuse as cf
 
 
-def test_fuse_appends_renumbered_note_trace_and_keeps_hw_bytes(tmp_path):
-    hw = tmp_path / "hw.perfetto"
-    hw_bytes = b"\x00\x01hardware-bytes\xff" * 1000
-    hw.write_bytes(hw_bytes)
-    note = tmp_path / "note.pftrace"
-    note.write_bytes(wh.trace(wh.packet(seq=1), wh.packet(seq=2), wh.packet(seq=0)))
-    out = tmp_path / "fused.perfetto"
-
-    cf.fuse(str(hw), str(note), str(out))
-
-    data = out.read_bytes()
-    assert data.startswith(hw_bytes)  # hardware file is copied untouched
-    assert [p["seq"] for p in wh.parse(data[len(hw_bytes) :])] == [1001, 1002, 0]
-
-
-def test_fuse_inplace_renames_the_hardware_file(tmp_path):
-    hw = tmp_path / "hw.perfetto"
-    hw_bytes = b"hardware" * 100
-    hw.write_bytes(hw_bytes)
-    note = tmp_path / "note.pftrace"
-    note.write_bytes(wh.trace(wh.packet(seq=1)))
-    out = tmp_path / "fused.perfetto"
-    cf.fuse(str(hw), str(note), str(out), inplace=True)
-    assert not hw.exists()  # no second copy of the big file
-    data = out.read_bytes()
-    assert data.startswith(hw_bytes)
-    assert wh.parse(data[len(hw_bytes) :])[0]["seq"] == 1001
-
-
-def test_fuse_streams_large_hw_file(tmp_path):
-    hw = tmp_path / "hw.perfetto"
-    size = cf.CHUNK + 1024 * 1024  # more than one chunk
-    hw.write_bytes(b"\xab" * size)
-    note = tmp_path / "note.pftrace"
-    note.write_bytes(b"")
-    out = tmp_path / "fused.perfetto"
-    cf.fuse(str(hw), str(note), str(out))
-    assert out.stat().st_size == size
-
-
-def test_shift_trace_file_moves_timestamps(tmp_path):
-    src = tmp_path / "in.pf"
-    src.write_bytes(wh.trace(wh.packet(ts=5000, events=[7000])))
-    dst = tmp_path / "out.pf"
-    cf.shift_trace_file(str(src), str(dst), -1000)
-    p = wh.parse(dst.read_bytes())[0]
-    assert p["ts"] == 4000 and p["events"] == [6000]
+def test_fused_name_follows_the_format():
+    assert cf.fused_name("t", "archive") == "fused_t.tar"
+    assert cf.fused_name("t", "flat") == "fused_t.perfetto"
 
 
 def test_installed_nxtrace_needs_no_pynuttx_option(monkeypatch):
@@ -146,7 +105,7 @@ def make_popen(tmp_path, started, decode_rc=0, notes=b"\x01\x02"):
             return FakeDecodeProc(lines, decode_rc)
         started.append(list(cmd))
         if "-o" in cmd:  # nxtrace capture -> note perfetto at the note clock
-            (tmp_path / "note_t.raw.pftrace").write_bytes(
+            (tmp_path / "note_t.pftrace").write_bytes(
                 wh.trace(wh.packet(ts=5000, seq=1))
             )
         return FakeJob()
@@ -214,44 +173,75 @@ def test_note_passes_are_launched_from_the_notes_line(monkeypatch, tmp_path):
     assert len(started) == 2
 
 
-def test_full_pipeline_shifts_note_trace_and_fuses(monkeypatch, tmp_path):
+def aligned_pipeline(monkeypatch, tmp_path, aligned=None, opened=None):
+    """Run-ready fakes: decode/nxtrace create their files, align finds offset 1000."""
     monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
     monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
-    aligned, opened = [], []
 
     def fake_align(argv):
-        aligned.append(argv)
+        if aligned is not None:
+            aligned.append(argv)
         (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
         return 0
 
     monkeypatch.setattr(cf, "align_main", fake_align)
-    monkeypatch.setattr(cf, "perfetto_open_main", opened.append)
+    if opened is not None:
+        monkeypatch.setattr(cf, "perfetto_open_main", opened.append)
+
+
+def test_full_pipeline_writes_an_archive_with_the_offset_in_its_manifest(
+    monkeypatch, tmp_path
+):
+    aligned, opened = [], []
+    aligned_pipeline(monkeypatch, tmp_path, aligned, opened)
     rc = cf.main(base_args(tmp_path, "--tcbmap", "map.txt", "--open"))
     assert rc == 0
+    with tarfile.open(tmp_path / "fused_t.tar") as tar:
+        manifest = json.load(tar.extractfile("perfetto_manifest.json"))
+        assert tar.extractfile("hw.pftrace").read() == b"HW"
+        note = tar.extractfile("note.pftrace").read()
+    # note_ns - offset = hw_ns, so Perfetto must move the note trace by -offset
+    clocks = manifest["perfetto_manifest"]["files"][1]["clocks"]
+    assert clocks["offset_ns"] == -1000
+    # the note trace is stored exactly as nxtrace wrote it, on its own clock
+    assert wh.parse(note)[0]["ts"] == 5000
+    assert wh.parse((tmp_path / "note_t.pftrace").read_bytes())[0]["ts"] == 5000
+    assert "--tcbmap" in aligned[0] and "--hw-runs" in aligned[0]
+    assert opened and opened[0][0].endswith("fused_t.tar") and opened[0][-1] == "--keep"
+    assert not (tmp_path / "hw_t.perfetto").exists()  # the archive holds it
+
+
+def test_flat_format_moves_the_note_timestamps_and_merges_in_place(
+    monkeypatch, tmp_path
+):
+    aligned_pipeline(monkeypatch, tmp_path)
+    assert cf.main(base_args(tmp_path, "--merge-format", "flat")) == 0
     fused = (tmp_path / "fused_t.perfetto").read_bytes()
     assert fused.startswith(b"HW")
     packet = wh.parse(fused[2:])[0]
     assert packet["ts"] == 5000 - 1000  # note_ns - offset = hw_ns
     assert packet["seq"] == 1001
-    assert wh.parse((tmp_path / "note_t.pftrace").read_bytes())[0]["ts"] == 4000
-    assert not (tmp_path / "note_t.raw.pftrace").exists()  # temp file removed
-    assert "--tcbmap" in aligned[0] and "--hw-runs" in aligned[0]
-    assert opened and opened[0][-1] == "--keep"
+    assert wh.parse((tmp_path / "note_t.pftrace").read_bytes())[0]["ts"] == 5000
     assert not (tmp_path / "hw_t.perfetto").exists()  # merged in place, not copied
+    assert not (tmp_path / "fused_t.tar").exists()
 
 
 def test_keep_parts_keeps_the_hardware_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
-    monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
-
-    def fake_align(_argv):
-        (tmp_path / "offset_t.txt").write_text("1000", encoding="utf-8")
-        return 0
-
-    monkeypatch.setattr(cf, "align_main", fake_align)
+    aligned_pipeline(monkeypatch, tmp_path)
     assert cf.main(base_args(tmp_path, "--keep-parts")) == 0
     assert (tmp_path / "hw_t.perfetto").read_bytes() == b"HW"
+    assert (tmp_path / "fused_t.tar").exists()
+
+
+def test_archive_falls_back_to_flat_when_the_disk_cannot_hold_the_copy(
+    monkeypatch, tmp_path
+):
+    aligned_pipeline(monkeypatch, tmp_path)
+    free = iter([10**12])  # the up-front space check passes, later ones do not
+    monkeypatch.setattr(cf.runstore, "free_bytes", lambda _p: next(free, 1))
+    assert cf.main(base_args(tmp_path)) == 0
     assert (tmp_path / "fused_t.perfetto").read_bytes().startswith(b"HW")
+    assert not (tmp_path / "fused_t.tar").exists()
 
 
 def test_missing_raw_and_low_disk_stop_before_any_work(monkeypatch, tmp_path):
@@ -267,15 +257,17 @@ def test_missing_raw_and_low_disk_stop_before_any_work(monkeypatch, tmp_path):
     assert "not enough free space" in str(e.value)
 
 
-def test_alignment_failure_leaves_note_trace_unshifted(monkeypatch, tmp_path):
+def test_alignment_failure_writes_no_merged_file(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cf.subprocess, "run", lambda *a, **_k: None)
     monkeypatch.setattr(cf.subprocess, "Popen", make_popen(tmp_path, []))
     monkeypatch.setattr(cf, "align_main", lambda _argv: 1)
     cf.main(base_args(tmp_path))
-    # no offset: the note trace is kept on its own clock
+    # no offset: Perfetto could not place the note trace, so nothing is merged
     assert wh.parse((tmp_path / "note_t.pftrace").read_bytes())[0]["ts"] == 5000
-    assert (tmp_path / "note_t.pftrace").exists()
+    assert (tmp_path / "hw_t.perfetto").exists()
     assert not (tmp_path / "fused_t.perfetto").exists()
+    assert not (tmp_path / "fused_t.tar").exists()
+    assert "UNALIGNED" in capsys.readouterr().out
 
 
 def test_missing_note_trace_is_reported(monkeypatch, tmp_path):
@@ -299,7 +291,7 @@ def test_nxtrace_commands_use_freq_and_pid_names(tmp_path):
             "--tcbmap", "m.txt", "--out-dir", "o",
         ]  # fmt: skip
     )
-    paths = {"notes_bin": "n.bin", "note_raw": "raw.pf"}
+    paths = {"notes_bin": "n.bin", "note_pf": "raw.pf"}
     dump, pftrace = cf.nxtrace_commands(a, paths)
     assert dump[-3:] == ["dump", "file", "n.bin"]
     assert pftrace[-4:] == ["-o", "raw.pf", "file", "n.bin"]

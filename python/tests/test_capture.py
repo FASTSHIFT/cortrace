@@ -136,6 +136,24 @@ def test_run_captures_when_no_raw_given(monkeypatch, tmp_path):
     assert result.endswith("raw_t.bin.pf")
 
 
+def test_fuse_mode_forwards_the_merge_format_and_finds_the_archive(
+    monkeypatch, tmp_path
+):
+    seen = []
+
+    def fake_fuse(argv):
+        seen.append(argv)
+        (tmp_path / "o" / "fused_t.tar").write_bytes(b"")
+        return 0
+
+    monkeypatch.setattr(capture.fuse_mod, "main", fake_fuse)
+    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
+    a = args(tmp_path / "o", fuse=True, width=None)
+    assert a.merge_format == "archive"  # the default for capture
+    assert capture.run(a).endswith("fused_t.tar")
+    assert seen[0][seen[0].index("--merge-format") + 1] == "archive"
+
+
 def test_fuse_mode_hands_over_and_finds_the_fused_file(monkeypatch, tmp_path):
     seen = []
 

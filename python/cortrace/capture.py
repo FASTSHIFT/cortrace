@@ -22,7 +22,7 @@ import tempfile
 import time
 
 from . import fuse as fuse_mod
-from . import runstore
+from . import merge, runstore
 from ._paths import find_binary
 from .fpga import ctrl
 from .perfetto_open import main as perfetto_open_main
@@ -56,6 +56,13 @@ def add_capture_options(ap):
     ap.add_argument("--tag", default=None, help="file name suffix (default: timestamp)")
     ap.add_argument(
         "--fuse", action="store_true", help="also decode the NuttX notes and fuse"
+    )
+    ap.add_argument(
+        "--merge-format",
+        choices=merge.FORMATS,
+        default="archive",
+        help="with --fuse: archive = fused_<tag>.tar (Perfetto manifest, traces "
+        "untouched; default), flat = one fused_<tag>.perfetto",
     )
     ap.add_argument("--nm", default="arm-none-eabi-nm", help="nm for the ELF symbols")
     ap.add_argument(
@@ -178,7 +185,7 @@ def fuse_args(a, raw, extra):
     """Arguments handing the raw capture to `cortrace fuse`."""
     args = ["--raw", raw, "--elf", a.elf, "--out-dir", a.out_dir, "--tag", a.tag]
     args += ["--width", str(a.width or 4), "--sysclk-hz", str(a.sysclk_hz)]
-    args += ["--nm", a.nm]
+    args += ["--nm", a.nm, "--merge-format", a.merge_format]
     if a.tsgen_hz:
         args += ["--tsgen-hz", str(a.tsgen_hz)]
     if a.tcbmap:
@@ -207,9 +214,11 @@ def run(a, raw_in=None, extra=()):
         rc = fuse_mod.main(fuse_args(a, raw, extra))
         if rc != 0:
             sys.exit("fuse failed")
-        fused = os.path.join(a.out_dir, f"fused_{a.tag}.perfetto")
-        if os.path.isfile(fused):
-            return fused
+        # fuse falls back to the flat format when the disk cannot hold the archive
+        for fmt in (a.merge_format, "flat", "archive"):
+            fused = os.path.join(a.out_dir, fuse_mod.fused_name(a.tag, fmt))
+            if os.path.isfile(fused):
+                return fused
         log("clock alignment failed: no fused file, using the hardware trace")
         return os.path.join(a.out_dir, f"hw_{a.tag}.perfetto")
     return decode_hw(a, raw)

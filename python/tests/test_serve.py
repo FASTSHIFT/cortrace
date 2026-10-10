@@ -21,6 +21,14 @@ def test_parse_defaults_and_forwarding(tmp_path):
     assert serve.parse_args(argv(tmp_path)).port == 8037
 
 
+def test_serve_always_streams_the_flat_format(tmp_path, capsys):
+    """The Record flow hands TracePackets to the UI; an archive cannot be that."""
+    assert serve.parse_args(argv(tmp_path)).merge_format == "flat"
+    with pytest.raises(SystemExit):
+        serve.parse_args(argv(tmp_path, "--merge-format", "archive"))
+    assert "--merge-format flat" in capsys.readouterr().err
+
+
 def test_capture_callback_runs_the_pipeline_with_a_fresh_tag(monkeypatch, tmp_path):
     a = serve.parse_args(argv(tmp_path, "--fuse"))
     tags = []

@@ -26,6 +26,7 @@ def parse_args(argv=None):
         description="serve a Perfetto Record target that captures on Start",
     )
     capture.add_capture_options(ap)
+    ap.set_defaults(merge_format="flat")
     ap.add_argument("--port", type=int, default=8037, help="WebSocket port")
     ap.add_argument(
         "--allow-origin",
@@ -35,6 +36,8 @@ def parse_args(argv=None):
     )
     ap.add_argument("--quiet", action="store_true")
     a, extra = ap.parse_known_args(argv)
+    if a.merge_format != "flat":
+        ap.error("serve streams TracePackets to the UI: use --merge-format flat")
     a = capture.finish_args(ap, a)
     a.extra = extra
     return a

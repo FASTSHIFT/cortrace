@@ -12,8 +12,10 @@ and DWT. A single capture therefore carries all three on one time base:
                      `-- --nx-runs-out runs.tsv   (hardware thread switches)
   notes.bin    ->  nxtrace (pynuttx) -> note Perfetto (.pftrace) + text dump
   align_check  ->  constant clock offset between the two (one-to-one pairing)
-  fuse         ->  note trace shifted onto the hardware axis, appended to the
-                   hardware file as fused_<tag>.perfetto
+  merge        ->  the two traces on one timeline: by default a TAR with a
+                   Perfetto manifest (fused_<tag>.tar), the traces untouched and
+                   Perfetto applying the offset; --merge-format flat gives one
+                   fused_<tag>.perfetto with the note timestamps moved instead
 
 This tool does NOT capture: give it a raw file from whatever front end you
 use (an FPGA streamer, a probe, ...). Outputs land in --out-dir.
@@ -33,52 +35,46 @@ import tempfile
 import threading
 import time
 
-from . import runstore, wire
+from . import merge as merge_mod
+from . import runstore
 from ._paths import find_binary
 from .align import main as align_main
 from .perfetto_open import main as perfetto_open_main
 
-CHUNK = 16 * 1024 * 1024
-SEQ_ID_OFFSET = 1000  # note-trace packet sequence ids are raised by this
+
+def fused_name(tag, fmt):
+    """File name of the merged trace for a merge format."""
+    return f"fused_{tag}.tar" if fmt == "archive" else f"fused_{tag}.perfetto"
 
 
-def fuse(hw, note_pf, out, inplace=False):
-    """Merge two Perfetto traces into one file.
+def merge_traces(a, paths, offset):
+    """Merge hardware and note traces; returns the merged file's path.
 
-    A Perfetto trace is a sequence of TracePackets, so concatenating files is a
-    valid merge as long as the packet sequences stay distinct: packets sharing
-    a trusted_packet_sequence_id share incremental state, and the note trace's
-    trace_config / clock_snapshot / state-clearing packets would otherwise land
-    on the same sequence as the millions of hardware track events. The note
-    trace is small, so its sequence ids are renumbered (leaving the big
-    hardware file's bytes untouched).
-
-    inplace=True appends the note packets to `hw` and renames it to `out`, so
-    the (often 350+ MB) hardware trace is not copied and not stored twice.
+    `offset` is note_ns - hw_ns (the fit from `align`), so the note trace is
+    moved by -offset on the hardware axis. The archive format copies the
+    hardware trace into the TAR; when the disk cannot hold that copy we fall
+    back to the flat format, which merges in place.
     """
-    with open(note_pf, "rb") as f:
-        note = wire.rewrite_trace(f.read(), seq_add=SEQ_ID_OFFSET)
-    if inplace:
-        with open(hw, "ab") as dst:
-            dst.write(note)
-        os.replace(hw, out)
-        return
-    with open(out, "wb") as dst:
-        with open(hw, "rb") as src:
-            while True:
-                chunk = src.read(CHUNK)
-                if not chunk:
-                    break
-                dst.write(chunk)
-        dst.write(note)
-
-
-def shift_trace_file(src, dst, offset_ns):
-    """Write src (a Perfetto trace) to dst with all timestamps moved by offset_ns."""
-    with open(src, "rb") as f:
-        data = f.read()
-    with open(dst, "wb") as f:
-        f.write(wire.rewrite_trace(data, offset_ns=offset_ns))
+    traces = [
+        merge_mod.Trace(paths["hw"], "hw"),
+        merge_mod.Trace(paths["note_pf"], "note", -offset),
+    ]
+    fmt = a.merge_format
+    if fmt == "archive":
+        need = sum(os.path.getsize(t.path) for t in traces)
+        if runstore.free_bytes(a.out_dir) < need * runstore.HEADROOM:
+            print(
+                "not enough free space for the archive (it copies the hardware "
+                "trace); writing the flat format instead",
+                file=sys.stderr,
+            )
+            fmt = "flat"
+    out = os.path.join(a.out_dir, fused_name(a.tag, fmt))
+    inplace = fmt == "flat" and not a.keep_parts
+    merge_mod.merge(traces, out, fmt, inplace=inplace)
+    if fmt == "archive" and not a.keep_parts:
+        os.unlink(paths["hw"])  # the archive holds it now
+    return out
 
 
 def parse_args(argv=None):
@@ -122,15 +118,23 @@ def parse_args(argv=None):
     ap.add_argument(
         "--keep-parts",
         action="store_true",
-        help="keep hw_<tag>.perfetto next to fused_<tag>.perfetto (costs a second "
+        help="keep hw_<tag>.perfetto next to the merged file (costs a second "
         "copy of the hardware trace)",
+    )
+    ap.add_argument(
+        "--merge-format",
+        choices=merge_mod.FORMATS,
+        default="archive",
+        help="archive: fused_<tag>.tar, traces untouched, Perfetto applies the "
+        "clock offset (default); flat: one fused_<tag>.perfetto with the note "
+        "timestamps moved, for viewers that cannot read archives",
     )
     ap.add_argument("--tag", default=time.strftime("%Y%m%d-%H%M%S"))
     ap.add_argument("--open", action="store_true", help="open the result in Perfetto")
     ap.add_argument(
         "--no-fuse",
         action="store_true",
-        help="do not write the merged fused_<tag>.perfetto",
+        help="do not merge the hardware and note traces",
     )
     a = ap.parse_args(argv)
     if not a.out_dir:
@@ -215,7 +219,7 @@ def nxtrace_commands(a, paths):
     if a.tcbmap:
         nx += ["--pid-names", a.tcbmap]
     dump = nx + ["--format", "dump", "file", paths["notes_bin"]]
-    pftrace = nx + ["-o", paths["note_raw"], "file", paths["notes_bin"]]
+    pftrace = nx + ["-o", paths["note_pf"], "file", paths["notes_bin"]]
     return dump, pftrace
 
 
@@ -241,13 +245,11 @@ def main(argv=None):
         for key, name in (
             ("hw", "hw_{tag}.perfetto"),
             ("notes_bin", "notes_{tag}.bin"),
-            ("note_raw", "note_{tag}.raw.pftrace"),
             ("note_pf", "note_{tag}.pftrace"),
             ("note_txt", "note_{tag}.txt"),
             ("note_log", "nxtrace_{tag}.log"),
             ("runs", "hwruns_{tag}.tsv"),
             ("offset", "offset_{tag}.txt"),
-            ("fused", "fused_{tag}.perfetto"),
         )
     }
 
@@ -258,8 +260,8 @@ def main(argv=None):
     env = dict(os.environ)
     if a.pynuttx:
         env["PYTHONPATH"] = a.pynuttx + os.pathsep + env.get("PYTHONPATH", "")
-    if os.path.exists(paths["note_raw"]):
-        os.unlink(paths["note_raw"])  # nxtrace appends to an existing output file
+    if os.path.exists(paths["note_pf"]):
+        os.unlink(paths["note_pf"])  # nxtrace appends to an existing output file
     note_jobs = []
 
     def start_note_jobs():
@@ -316,24 +318,23 @@ def main(argv=None):
         with open(paths["offset"], encoding="utf-8") as f:
             offset = int(f.read())
 
-    # Note Perfetto, moved onto the hardware time axis when the fit worked
-    # (note_ns - offset = hw_ns).
-    if not os.path.isfile(paths["note_raw"]):
+    # The note trace stays on its own clock; the merge places it on the
+    # hardware axis (note_ns - offset = hw_ns).
+    if not os.path.isfile(paths["note_pf"]):
         sys.exit("nxtrace produced no note trace")
-    shift_trace_file(paths["note_raw"], paths["note_pf"], -(offset or 0))
-    os.unlink(paths["note_raw"])
 
-    # One file with both: concatenation is a valid Perfetto merge.
     fused = None
     if offset is not None and not a.no_fuse:
-        fused = paths["fused"]
-        fuse(paths["hw"], paths["note_pf"], fused, inplace=not a.keep_parts)
+        fused = merge_traces(a, paths, offset)
 
-    note_axis = "(on the hardware time axis)" if offset is not None else "(UNALIGNED)"
+    if offset is None:
+        note_axis = "(UNALIGNED: no clock offset found)"
+    else:
+        note_axis = f"(own clock; placed {-offset} ns onto the hardware axis)"
     print()
     if fused:
         print(f"fused    : {fused}")
-    if not fused or a.keep_parts:
+    if not fused or os.path.isfile(paths["hw"]):
         print(f"hardware : {paths['hw']}")
     print(f"note     : {paths['note_pf']}  {note_axis}")
     print(f"note text: {paths['note_txt']}\nraw notes: {paths['notes_bin']}")
