@@ -18,7 +18,7 @@ omit = ["python/tests/*"]
 
 [tool.coverage.report]
 # Keep parity with the C++ line-coverage gate (80%).
-fail_under = 80
+fail_under = 90
 show_missing = true
 exclude_lines = [
     "pragma: no cover",

@@ -130,7 +130,7 @@ Python 包（`python/cortrace`）用 black 格式化 + pylint 检查（见 `pypr
 ```sh
 scripts/format-py.sh          # black 原地格式化
 scripts/format-py.sh --check  # CI 模式：black --check + pylint
-python -m pytest python/tests --cov --cov-fail-under=80   # 测试 + 覆盖率门禁（80%）
+python -m pytest python/tests --cov --cov-fail-under=90   # 测试 + 覆盖率门禁（90%）
 ```
 
 ## Git 钩子

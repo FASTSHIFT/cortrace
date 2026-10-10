@@ -76,8 +76,8 @@ jobs:
         run: pip install black pylint pytest pytest-cov
       - name: Format + lint (black --check + pylint)
         run: bash scripts/format-py.sh --check
-      - name: Tests + coverage gate (fail under 80%)
-        run: pytest python/tests --cov --cov-report=term-missing --cov-fail-under=80
+      - name: Tests + coverage gate (fail under 90%)
+        run: pytest python/tests --cov --cov-report=term-missing --cov-fail-under=90
 
   deb:
     name: .deb (ubuntu 22.04) build + smoke test

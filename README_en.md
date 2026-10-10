@@ -148,7 +148,7 @@ The Python package (`python/cortrace`) uses black + pylint (see `pyproject.toml`
 ```sh
 scripts/format-py.sh          # black format in place
 scripts/format-py.sh --check  # CI mode: black --check + pylint
-python -m pytest python/tests --cov --cov-fail-under=80   # tests + coverage gate (80%)
+python -m pytest python/tests --cov --cov-fail-under=90   # tests + coverage gate (90%)
 ```
 
 ## Git hooks
