@@ -308,7 +308,13 @@ cortrace merge -o merged.tar \
 
 第一个 `--trace` 是基准（时间线以它为准），其余的要给 `offset-ns`，含义和 Perfetto manifest 一致：正数表示把这份
 trace 往后移。`cortrace fuse` 里的 `offset_<tag>.txt` 是"note 时间减去硬件时间"，写进 manifest 时取负。
-`--format flat` 输出单个 `.perfetto`。也可以不用 cortrace，直接用 Perfetto 自己的
+`--format flat` 输出单个 `.perfetto`。
+
+偏移也可以不手填：每份 trace 给一个上下文切换日志 `switches=LOG`（每次线程切入一行 `<ns>\t<名字> (pid N)`），
+`cortrace merge` 按同一线程的切换配对，拟合出固定偏移并打印残差。入口也可以用 `nxtrace merge`（只是转发）。
+怎么让别的 trace（比如 QEMU）接进来，见 [`05-trace-producers.md`](05-trace-producers.md)。
+
+也可以不用 cortrace，直接用 Perfetto 自己的
 `trace_processor util merge -o merged.tar --manifest manifest.json a.pftrace b.pftrace`，格式见
 [manifest 规范](https://perfetto.dev/docs/reference/perfetto-manifest)。
 
