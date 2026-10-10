@@ -24,6 +24,8 @@ import re
 import statistics
 import sys
 
+from . import noteenum
+
 
 def load_tcbmap(path):
     """name -> pid, from nx_tcbmap.py output ('0xTCB<TAB>pid<TAB>name')."""
@@ -155,6 +157,25 @@ def global_fit(hw, notes, tol_ns):
     return best_off, best_res
 
 
+UPSTREAM_NOTE_RESUME = 3
+
+
+def resolve_resume_type(given, elf, readelf):
+    """The NOTE_RESUME number: --resume-type, else the ELF's debug info, else
+    the upstream NuttX value."""
+    if given is not None:
+        return given
+    if elf:
+        value = noteenum.enum_value(elf, "note_type_e", "NOTE_RESUME", readelf)
+        if value is not None:
+            return value
+        print(
+            f"NOTE_RESUME not found in {elf}, assuming {UPSTREAM_NOTE_RESUME}",
+            file=sys.stderr,
+        )
+    return UPSTREAM_NOTE_RESUME
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -167,7 +188,14 @@ def main(argv=None):
         "--tcbmap", default=None, help="nx_tcbmap.py output (thread name -> pid)"
     )
     ap.add_argument(
-        "--resume-type", type=int, default=3, help="note type of NOTE_RESUME"
+        "--resume-type",
+        type=int,
+        default=None,
+        help="note type of NOTE_RESUME (default: read from --elf, else 3)",
+    )
+    ap.add_argument("--elf", help="firmware ELF, to read the NOTE_RESUME value from")
+    ap.add_argument(
+        "--readelf", default="arm-none-eabi-readelf", help="readelf for the ELF"
     )
     ap.add_argument(
         "--offset-out", help="write the fitted offset (note_ns - hw_ns, integer) here"
@@ -182,7 +210,8 @@ def main(argv=None):
 
     name2pid = load_tcbmap(a.tcbmap)
     hw = hw_switches_tsv(a.hw_runs, name2pid)
-    notes = note_switches(a.note, a.resume_type, name2pid)
+    resume_type = resolve_resume_type(a.resume_type, a.elf, a.readelf)
+    notes = note_switches(a.note, resume_type, name2pid)
     print(f"hardware switches: {len(hw)}   note switches: {len(notes)}")
     if not hw or not notes:
         sys.exit("nothing to compare")

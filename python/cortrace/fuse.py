@@ -36,7 +36,7 @@ import threading
 import time
 
 from . import merge as merge_mod
-from . import runstore
+from . import noteenum, runstore
 from ._paths import find_binary
 from .align import main as align_main
 from .perfetto_open import main as perfetto_open_main
@@ -107,7 +107,22 @@ def parse_args(argv=None):
         help="ETM TSGEN clock (hw wall-clock base)",
     )
     ap.add_argument(
-        "--itm-port", type=int, default=1, help="CONFIG_ARMV7M_NOTE_ITM_PORT"
+        "--itm-port",
+        type=int,
+        default=1,
+        help="ITM stimulus port the firmware writes the notes to "
+        "(CONFIG_ARMV7M_NOTE_ITM_PORT; the Vela coresight driver uses 0)",
+    )
+    ap.add_argument(
+        "--resume-type",
+        type=int,
+        default=None,
+        help="note type number of NOTE_RESUME (default: read from the ELF)",
+    )
+    ap.add_argument(
+        "--readelf",
+        default=None,
+        help="readelf for the ELF (default: next to --nm)",
     )
     ap.add_argument("--tcbmap", default=None, help="nx_tcbmap.py output (thread names)")
     ap.add_argument(
@@ -223,6 +238,27 @@ def nxtrace_commands(a, paths):
     return dump, pftrace
 
 
+def align_args(a, paths):
+    """Arguments of the clock-offset fit (cortrace align)."""
+    args = [
+        "--hw-runs",
+        paths["runs"],
+        "--note",
+        paths["note_txt"],
+        "--offset-out",
+        paths["offset"],
+        "--elf",
+        a.elf,
+        "--readelf",
+        a.readelf or noteenum.readelf_for(a.nm),
+    ]
+    if a.resume_type is not None:
+        args += ["--resume-type", str(a.resume_type)]
+    if a.tcbmap:
+        args += ["--tcbmap", a.tcbmap]
+    return args
+
+
 def tail_lines(path, count=12):
     """Last `count` lines of a text file (empty string if unreadable)."""
     try:
@@ -302,17 +338,7 @@ def main(argv=None):
 
     # Fit the constant offset between the two clocks (same capture, so the
     # switches pair up one-to-one; the offset is only the clock origin).
-    align = [
-        "--hw-runs",
-        paths["runs"],
-        "--note",
-        paths["note_txt"],
-        "--offset-out",
-        paths["offset"],
-    ]
-    if a.tcbmap:
-        align += ["--tcbmap", a.tcbmap]
-    align_ok = align_main(align) == 0 and os.path.isfile(paths["offset"])
+    align_ok = align_main(align_args(a, paths)) == 0 and os.path.isfile(paths["offset"])
     offset = None
     if align_ok:
         with open(paths["offset"], encoding="utf-8") as f:

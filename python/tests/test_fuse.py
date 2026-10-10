@@ -333,3 +333,22 @@ def test_tail_lines(tmp_path):
     f.write_text("".join(f"line{i}\n" for i in range(30)), encoding="utf-8")
     assert cf.tail_lines(str(f), 2) == "line28\nline29\n"
     assert cf.tail_lines(str(tmp_path / "missing")) == ""
+
+
+def test_align_gets_the_elf_and_the_note_resume_override(monkeypatch, tmp_path):
+    aligned = []
+    aligned_pipeline(monkeypatch, tmp_path, aligned)
+    assert cf.main(base_args(tmp_path, "--resume-type", "4")) == 0
+    argv = aligned[0]
+    assert argv[argv.index("--elf") + 1].endswith("x.elf")
+    assert argv[argv.index("--readelf") + 1] == "readelf"
+    assert argv[argv.index("--resume-type") + 1] == "4"
+
+
+def test_align_reads_resume_type_from_the_elf_by_default(monkeypatch, tmp_path):
+    aligned = []
+    aligned_pipeline(monkeypatch, tmp_path, aligned)
+    assert cf.main(base_args(tmp_path, "--readelf", "my-readelf")) == 0
+    argv = aligned[0]
+    assert argv[argv.index("--readelf") + 1] == "my-readelf"
+    assert "--resume-type" not in argv

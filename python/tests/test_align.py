@@ -169,3 +169,34 @@ def test_fit_offset_reports_how_it_paired():
     off, res, how = ac.fit_offset(ref, [(1100, 1), (1300, 1)], 50)  # one lost
     assert (off, how) == (1000, "fit")
     assert ac.fit_offset(ref, [(5, 9)], 10) == (None, [], None)
+
+
+def test_main_reads_the_resume_type_from_the_elf(tmp_path, monkeypatch, capsys):
+    runs = write(tmp_path, "runs.tsv", "100\tidle (pid 0)\n200\tw (pid 3)\n")
+    # type 3 lines are the SUSPEND notes of a tree that numbers RESUME 4
+    note = write(
+        tmp_path,
+        "note.txt",
+        "[1050] cpu=0 pid=0 type=3\n[1100] cpu=0 pid=0 type=4\n"
+        "[1150] cpu=0 pid=3 type=3\n[1200] cpu=0 pid=3 type=4\n",
+    )
+    readelf = tmp_path / "readelf"
+    readelf.write_text(
+        "#!/bin/sh\n"
+        "echo ' <1><1>: Abbrev Number: 1 (DW_TAG_enumeration_type)'\n"
+        "echo '    <2>   DW_AT_name        : note_type_e'\n"
+        "echo ' <2><3>: Abbrev Number: 2 (DW_TAG_enumerator)'\n"
+        "echo '    <4>   DW_AT_name        : NOTE_RESUME'\n"
+        "echo '    <5>   DW_AT_const_value : 4'\n",
+        encoding="utf-8",
+    )
+    readelf.chmod(0o755)
+    off = str(tmp_path / "off.txt")
+    rc = run_main(
+        monkeypatch,
+        ["--hw-runs", runs, "--note", note, "--offset-out", off]
+        + ["--elf", "fw.elf", "--readelf", str(readelf)],
+    )
+    assert rc == 0
+    assert Path(off).read_text(encoding="utf-8") == "1000"
+    assert "one-to-one" in capsys.readouterr().out
