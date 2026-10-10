@@ -230,6 +230,16 @@ cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out tcbmap.txt
 
 **目标侧**：固件打开 `CONFIG_ARMV7M_NOTE_ITM`（note 走 ITM 刺激端口 1，和 ETM、DWT 共用同一个 TPIU）。
 
+用别的 NuttX 树时有两处可能不同，都能在命令行里指定：
+
+- note 写到哪个 ITM 端口：`--itm-port N`（默认 1；Vela 的 `DRIVERS_NOTEITM` 用端口 0）。
+- `NOTE_RESUME` 的数值：上游是 3，开头多一个 `NOTE_ALL` 的树是 4。默认从 `--elf` 的调试信息里读
+  （用 `readelf`，和 `--nm` 同目录），读不到才按 3；也可以用 `--resume-type N` 直接指定。
+
+`capture --fuse` 不认识的选项会原样交给 `fuse`，所以这两个选项两边都能用。`cortrace tcbmap` 默认按上游的
+TCB 布局读 pid 和入口，布局不同时用 `--pid-off`、`--entry-off`（偏移可以用 gdb 的
+`print &((struct tcb_s *)0)->pid` 得到）。
+
 **主机侧**：需要 pynuttx。可以是 pip 装的包，也可以用源码目录：
 
 ```sh
