@@ -288,3 +288,67 @@ TEST(exception_name_mapping)
     CHECK_EQ(exception_name(16), std::string("IRQ:ext0"));
     CHECK_EQ(exception_name(20), std::string("IRQ:ext4"));
 }
+
+TEST(exception_names_cover_every_class)
+{
+    CHECK_EQ(exception_name(2), std::string("IRQ:NMI"));
+    CHECK_EQ(exception_name(3), std::string("IRQ:HardFault"));
+    CHECK_EQ(exception_name(11), std::string("IRQ:SVCall"));
+    CHECK_EQ(exception_name(14), std::string("IRQ:PendSV"));
+    CHECK_EQ(exception_name(15), std::string("IRQ:SysTick"));
+    CHECK_EQ(exception_name(4), std::string("IRQ:4")); // a system exception we do not name
+    CHECK_EQ(exception_name(16), std::string("IRQ:ext0")); // first external interrupt
+    CHECK_EQ(exception_name(31), std::string("IRQ:ext15"));
+}
+
+TEST(callstack_reentry_into_the_top_function_pops_the_stale_frame)
+{
+    // leaf is entered, calls "itself" (really: its return was lost and the
+    // next call lands on the same entry again). The stale leaf frame is closed
+    // before the new one opens, so the depth does not run away.
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::DirectCall, true));
+    m.process(Element::instr_range(0x2000, 0x2008, BranchKind::DirectCall, true)); // enters leaf
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false)); // leaf entry again
+    m.finish();
+    CHECK_EQ(m.metrics().recovered_missed_returns, 1L);
+    CHECK(m.metrics().balanced());
+    CHECK(m.metrics().max_depth <= 3);
+}
+
+TEST(callstack_timestamp_and_cycle_count_stamp_later_slices)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.process(Element::make_timestamp(777));
+    Element cc = Element::simple(ElementKind::CycleCount);
+    cc.has_cc = true;
+    cc.cycle_count = 40;
+    m.process(cc); // standalone cycle count: advances the clock, no stack effect
+    // an instruction range carrying its own 10 cycles, ending in a call
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::DirectCall, true, 0, true, 10));
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false)); // leaf begins
+    m.finish();
+    bool seen = false;
+    for (const auto& s : m.slices()) {
+        if (s.begin && s.name == "leaf") {
+            CHECK_EQ(s.etm_ts, static_cast<uint64_t>(777));
+            CHECK_EQ(s.cycle_clock, static_cast<uint64_t>(50)); // 40 + 10
+            seen = true;
+        }
+    }
+    CHECK(seen);
+}
+
+TEST(callstack_unknown_elements_change_nothing)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    const std::size_t before = m.slices().size();
+    m.process(Element::simple(ElementKind::Unknown));
+    CHECK_EQ(m.slices().size(), before);
+    m.finish();
+    CHECK(m.metrics().balanced());
+}

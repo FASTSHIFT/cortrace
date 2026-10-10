@@ -299,3 +299,68 @@ TEST(deframe_prefix_without_async_falls_back_to_full_search)
     CHECK_EQ(r.phase.parity, 0);
     CHECK_EQ(r.phase.order, 0);
 }
+
+namespace {
+// A frame whose first slot switches to `stream` with the data byte of that
+// slot still belonging to the PREVIOUS stream when `late` is set (the CoreSight
+// "stream change takes effect after the data byte" case, flagged in the aux
+// byte).
+std::vector<uint8_t> frame_with_stream_change(uint8_t stream, bool late)
+{
+    std::vector<uint8_t> f(16, 0);
+    f[0] = static_cast<uint8_t>((stream << 1) | 1);
+    f[1] = 0x20; // slot 0 data byte
+    f[2] = 0x40; // slot 1: already on the new stream either way
+    f[3] = 0x60;
+    f[15] = late ? 0x01 : 0x00; // aux LSBs: bit 0 = slot 0 is "late"
+    return f;
+}
+
+bool contains(const std::vector<uint8_t>& v, uint8_t b)
+{
+    return std::find(v.begin(), v.end(), b) != v.end();
+}
+} // namespace
+
+TEST(deframe_immediate_stream_change_claims_the_slot_data_byte)
+{
+    auto r = tpiu_deframe(with_sync(frame_with_stream_change(2, false)), 2, DeframePhase {});
+    CHECK(contains(r.etm, 0x20));
+    CHECK(contains(r.etm, 0x40));
+    CHECK(contains(r.etm, 0x60));
+}
+
+TEST(deframe_late_stream_change_leaves_the_slot_data_byte_to_the_old_stream)
+{
+    auto r = tpiu_deframe(with_sync(frame_with_stream_change(2, true)), 2, DeframePhase {});
+    CHECK(!contains(r.etm, 0x20)); // belonged to stream 0 (padding)
+    CHECK(contains(r.etm, 0x40)); // the new stream starts with the next slot
+    CHECK(contains(r.etm, 0x60));
+}
+
+TEST(deframe_multi_late_stream_change_leaves_the_slot_data_byte_to_the_old_stream)
+{
+    auto r = tpiu_deframe_multi(with_sync(frame_with_stream_change(2, true)), DeframePhase {});
+    CHECK(!contains(r.streams[2], 0x20));
+    CHECK(contains(r.streams[2], 0x40));
+    CHECK(contains(r.streams[2], 0x60));
+    // the per-byte source index stays parallel to the data
+    CHECK_EQ(r.src_index[2].size(), r.streams[2].size());
+}
+
+TEST(deframe_width2_order1_reverses_the_bits_inside_each_symbol)
+{
+    // Two capture bytes -> half-symbols 1,2,3,0 (trace_a then trace_b of each).
+    const std::vector<uint8_t> raw = { 0x21, 0x03 };
+    DeframePhase p;
+    p.width = 2;
+    p.parity = 0;
+    p.order = 0;
+    auto plain = assemble_nibbles(raw.data(), raw.size(), p);
+    p.order = 1;
+    auto reversed = assemble_nibbles(raw.data(), raw.size(), p);
+    CHECK_EQ(plain.size(), static_cast<std::size_t>(1));
+    CHECK_EQ(reversed.size(), static_cast<std::size_t>(1));
+    CHECK_EQ(static_cast<int>(plain[0]), 0x39); // 1 | 2<<2 | 3<<4 | 0<<6
+    CHECK_EQ(static_cast<int>(reversed[0]), 0x36); // 2 | 1<<2 | 3<<4 | 0<<6
+}

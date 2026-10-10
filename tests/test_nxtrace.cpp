@@ -517,3 +517,97 @@ TEST(note_unwrap_skips_garbage_and_resyncs)
     CHECK_EQ((long)st.notes, 1L);
     CHECK(st.skipped_bytes >= 3);
 }
+
+TEST(nxtrace_parse_skips_protocol_packets_and_stops_at_a_truncated_one)
+{
+    const std::vector<uint8_t> b = {
+        0x00, // sync / idle zero
+        0x10, // local timestamp, one byte
+        0xC0, 0x81, 0x05, // local timestamp with continuation bytes
+        0x08, // some other single-byte protocol packet
+        0x8F, 0x78, 0x56, 0x34, 0x12, // data-value write, comparator 0, 4 bytes
+        0x9F, 0x01, 0x02, // comparator 1 but only 2 of its 4 bytes: truncated
+    };
+    auto ev = parse_dwt_data_values(b, {});
+    CHECK_EQ(ev.size(), static_cast<std::size_t>(1));
+    CHECK_EQ(static_cast<long>(ev[0].src_index), 6L);
+    CHECK_EQ(static_cast<int>(ev[0].comparator), 0);
+    CHECK_EQ(ev[0].value, static_cast<uint32_t>(0x12345678));
+}
+
+TEST(nxtrace_itm_counts_other_protocol_bytes)
+{
+    // 0x08 is a protocol byte we only skip; 0x0B is a software packet on port 1.
+    const std::vector<uint8_t> b = { 0x08, 0x0B, 1, 2, 3, 4 };
+    ItmStats st;
+    auto out = extract_itm_stimulus(b, 1, &st);
+    CHECK_EQ(out.size(), static_cast<std::size_t>(4));
+    CHECK_EQ(st.other, static_cast<std::size_t>(1));
+    CHECK_EQ(st.port_packets, static_cast<std::size_t>(1));
+}
+
+TEST(nxtrace_thread_runs_without_a_resolver_name_the_pointer)
+{
+    std::vector<DwtEvent> ev(3);
+    ev[0].src_index = 10;
+    ev[0].comparator = 0;
+    ev[0].value = 0x20001000;
+    ev[1].src_index = 15;
+    ev[1].comparator = 1; // another comparator: not the watched one
+    ev[1].value = 0x20009000;
+    ev[2].src_index = 20;
+    ev[2].comparator = 0;
+    ev[2].value = 0x20002000;
+    auto runs = build_thread_runs(ev, {}, 0, 99);
+    CHECK_EQ(runs.size(), static_cast<std::size_t>(2));
+    CHECK_EQ(runs[0].id.name, std::string("tcb@0x20001000"));
+    CHECK_EQ(static_cast<long>(runs[0].end_src), 20L); // closed by the next switch
+    CHECK_EQ(static_cast<long>(runs[1].end_src), 99L); // closed at the end of the stream
+}
+
+TEST(nxtrace_resolver_names_the_thread_after_its_entry_when_the_pid_is_unreadable)
+{
+    SymbolTable syms;
+    syms.add(0x08000100, "worker");
+    syms.finalize();
+    const uint32_t tcb = 0x20000000;
+    NuttxResolver r(
+        [&](uint32_t addr, uint32_t& out) {
+            if (addr == tcb + 0x3C) { // entry field only; the pid read fails
+                out = 0x08000104;
+                return true;
+            }
+            return false;
+        },
+        syms);
+    ThreadId t = r(tcb);
+    CHECK_EQ(t.name, std::string("worker")); // no "(pid N)" suffix
+}
+
+TEST(nxtrace_load_tcb_map_trims_trailing_whitespace_from_names)
+{
+    const std::string path = cortrace_test::temp_path("tcbmap_ws.txt");
+    {
+        std::ofstream f(path);
+        f << "0x38000a90\t2\tworker \t\r\n"; // trailing blanks and a CR
+    }
+    auto m = load_tcb_map(path);
+    std::remove(path.c_str());
+    CHECK_EQ(m[0x38000a90u].name, std::string("worker (pid 2)"));
+}
+
+TEST(nxtrace_thread_slices_skip_runs_that_never_closed)
+{
+    std::vector<ThreadRun> runs(2);
+    runs[0].begin_src = 5;
+    runs[0].end_src = 5; // still open: no slice
+    runs[0].id.name = "open";
+    runs[1].begin_src = 5;
+    runs[1].end_src = 9;
+    runs[1].id.name = "closed";
+    std::map<int, std::string> names;
+    auto s = thread_runs_to_slices(runs, 7, names);
+    CHECK_EQ(s.size(), static_cast<std::size_t>(2)); // begin + end of the closed run
+    CHECK_EQ(s[0].name, std::string("closed"));
+    CHECK_EQ(names[7], std::string("Threads"));
+}
