@@ -16,7 +16,7 @@
 | 目标固件 | 任意 Cortex-M 固件（裸机、RTOS 均可）；线程泳道需要 NuttX | NuttX，且开启 `CONFIG_ARMV7M_NOTE_ITM` |
 | 额外依赖 | 无 | pynuttx（提供 `nxtrace`） |
 | 命令 | `cortrace capture` | `cortrace capture --fuse` |
-| 产物 | `hw_<tag>.perfetto` | `fused_<tag>.perfetto`（硬件 + 软件） |
+| 产物 | `hw_<tag>.perfetto` | `fused_<tag>.tar`（硬件 + 软件，Perfetto 合并归档；`--merge-format flat` 得到单个 `fused_<tag>.perfetto`） |
 
 两种模式都可以用命令行跑，也可以用 **网页点击模式**（`cortrace serve`）：在 ui.perfetto.dev 的 Record 页面点
 Start，抓取、解码、显示一气呵成（见第 5 节）。
@@ -42,8 +42,8 @@ flowchart LR
         DEC["cortrace-decode<br/>deframe + OpenCSD + 调用栈"]
         HW["hw_TAG.perfetto<br/>(独立模式的产物)"]
         NX["nxtrace (pynuttx)<br/>note 转软件 trace"]
-        ALN["对齐时钟 + 拼接"]
-        FUSED["fused_TAG.perfetto<br/>(融合模式的产物)"]
+        ALN["对齐时钟 + 合并"]
+        FUSED["fused_TAG.tar<br/>(融合模式的产物)"]
     end
     UI["ui.perfetto.dev"]
     TPIU --> CAP --> GRAB --> DEC --> HW
@@ -244,7 +244,8 @@ cortrace capture --fuse --elf nuttx --secs 1 --width 4 --tag demo --tcbmap tcbma
 ```
 
 流程：解码硬件 trace 的同时，一边从同一份抓取里取出 ITM 上的 note 字节流，交给 `nxtrace` 转成软件 trace（与解码并行），
-然后把硬件和软件两侧的线程切换逐个配对，拟合出两个时钟的固定偏移，把软件 trace 平移到硬件时间轴上，拼成一个文件。
+然后把硬件和软件两侧的线程切换逐个配对，拟合出两个时钟的固定偏移，再把两份 trace 合并到同一条时间轴上
+（合并方式见下面"合并格式"）。
 各步骤之间的依赖关系（解码最耗时，nxtrace 的两遍转换在它进行的同时就已经开始）：
 
 ```mermaid
@@ -255,9 +256,8 @@ flowchart TD
     DEC -->|"解码结束"| RUNS["hwruns_TAG.tsv<br/>hw_TAG.perfetto"]
     N1 --> ALIGN["对齐：逐个配对硬件/软件的线程切换<br/>得到固定时钟偏移 offset"]
     RUNS --> ALIGN
-    N2 --> SHIFT["按 offset 平移软件 trace 的时间戳<br/>并重编号 sequence id"]
-    ALIGN --> SHIFT
-    SHIFT --> MERGE["追加到 hw_TAG.perfetto 末尾<br/>改名为 fused_TAG.perfetto"]
+    N2 --> MERGE["合并：fused_TAG.tar<br/>= manifest + hw trace + note trace<br/>offset 写在 manifest 里，由 Perfetto 施加"]
+    ALIGN --> MERGE
     RUNS --> MERGE
     ALIGN -.->|"对不上"| FALLBACK["不生成 fused，只保留硬件 trace<br/>(见第 7 节)"]
 ```
@@ -267,14 +267,15 @@ flowchart TD
 ```
 matched   : 6902/6902 hw switches within +/-30 us of one common offset
 residual  : mean -0.042 us  sd 0.280 us  min -0.873  max +0.693
-fused     : <out-dir>/fused_demo.perfetto
+fused     : <out-dir>/fused_demo.tar
 ```
 
 `matched` 是硬件侧线程切换里能和软件 note 配上的数量，实测 6902/6902，残差标准差 0.28 µs。实测端到端约 15 秒，
-`fused_*.perfetto` 约 362 MB（硬件 trace 就地追加 note，不会再复制一份 355 MB；需要同时保留 `hw_*.perfetto`
-时加 `--keep-parts`）。
+`fused_*.tar` 约 362 MB。归档写完后 `hw_*.perfetto` 会被删掉（它已经在归档里了）；需要同时保留时加
+`--keep-parts`。
 
-输出目录里还会有：`notes_<tag>.bin`（原样的 note 字节流）、`note_<tag>.pftrace`（软件 trace，已平移到硬件时间轴）、
+输出目录里还会有：`notes_<tag>.bin`（原样的 note 字节流）、`note_<tag>.pftrace`（软件 trace，保持 nxtrace 写出的
+原样，在它自己的时钟上；偏移记在归档的 manifest 里）、
 `note_<tag>.txt`（note 文本）、`hwruns_<tag>.tsv`（硬件侧线程切换）、`offset_<tag>.txt`（时钟偏移，纳秒）、
 `nxtrace_<tag>.log`（nxtrace 的错误输出，出问题先看它）。
 
@@ -284,10 +285,37 @@ fused     : <out-dir>/fused_demo.perfetto
 cortrace fuse --raw raw_demo.bin --elf nuttx --out-dir ~/traces --tag again --tcbmap tcbmap.txt
 ```
 
+**合并格式**（`--merge-format`，`capture --fuse` 和 `fuse` 都有）：
+
+| | `archive`（默认） | `flat` |
+|---|---|---|
+| 产物 | `fused_<tag>.tar` | `fused_<tag>.perfetto` |
+| 做法 | 一个 TAR：`perfetto_manifest.json` + 硬件 trace + note trace，两份 trace **原封不动**；manifest 把它们记成 `hw`、`note` 两台"机器"，并用 `offset_ns` 声明 note 时钟相对硬件时钟的偏移，由 Perfetto 在加载时施加 | 把 note trace 的时间戳在 protobuf 线格式上平移，重编号 sequence id，追加到硬件文件末尾 |
+| 谁来对时间 | Perfetto（官方的 [trace 合并机制](https://perfetto.dev/docs/analysis/merging-traces)） | cortrace 自己改字节 |
+| 打开方式 | `trace_processor`、ui.perfetto.dev（较新版本；`cortrace open` 可以直接打开） | 任何能打开 `.perfetto` 的查看器 |
+| 适合 | 日常使用 | 旧版查看器；`cortrace serve`（网页点击模式要把 trace 以数据包流的方式送进 UI，TAR 做不到，所以 `serve` 固定用 `flat`） |
+
+归档要把硬件 trace 复制进 TAR，磁盘放不下这一份拷贝时，cortrace 会自动改用 `flat`（原地追加，不多占空间）并给出提示。
+两种格式加载到 Perfetto 里的内容完全一样：用同一份数据对比过，切片总数、时间范围和按轨道类型的时间戳/时长指纹逐项一致。
+
+合并本身不依赖 OS，也不依赖调试器的 trace 源，所以也单独提供成命令，任何能产出 Perfetto trace 的工具都可以调用：
+
+```sh
+cortrace merge -o merged.tar \
+    --trace hw.perfetto,machine=hw \
+    --trace note.pftrace,machine=note,offset-ns=-16968614631670
+```
+
+第一个 `--trace` 是基准（时间线以它为准），其余的要给 `offset-ns`，含义和 Perfetto manifest 一致：正数表示把这份
+trace 往后移。`cortrace fuse` 里的 `offset_<tag>.txt` 是"note 时间减去硬件时间"，写进 manifest 时取负。
+`--format flat` 输出单个 `.perfetto`。也可以不用 cortrace，直接用 Perfetto 自己的
+`trace_processor util merge -o merged.tar --manifest manifest.json a.pftrace b.pftrace`，格式见
+[manifest 规范](https://perfetto.dev/docs/reference/perfetto-manifest)。
+
 ### 4.3 看结果
 
 - `--open`，或 `cortrace open <文件>`：起一个本机页面把文件交给 ui.perfetto.dev（trace 数据只走本机，不上传）。
-- 也可以直接把 `.perfetto` 文件拖进 https://ui.perfetto.dev 。
+- 也可以直接把 `.perfetto` 或 `.tar` 文件拖进 https://ui.perfetto.dev 。
 - 融合文件里，硬件轨道（调用栈、`Threads` 线程泳道）和软件轨道（调度、线程）在同一条时间轴上，可以直接对照。
 
 ### 4.4 查看 FPGA 版本
@@ -400,7 +428,7 @@ python -m nxtrace traced --elf /abs/path/nuttx --ws-port 8037 \
   数据经过它。如果你的内核仍然用 RTT 输出 note，换成 `tcp 127.0.0.1:9091`（常驻 OpenOCD 的 RTT 服务）。
 
 结果在 `--out-dir` 里，和直接 `cortrace capture` 的产物一样：硬件 trace 是 `hw_<tag>.perfetto`。命令里加
-`--fuse` 就得到 `fused_<tag>.perfetto`，硬件和软件在同一条时间轴上。和 `cortrace serve` 的区别：
+`--fuse` 就得到 `fused_<tag>.tar`（合并格式见 4.2 节），硬件和软件在同一条时间轴上。和 `cortrace serve` 的区别：
 
 | | `cortrace serve`（第 5 节） | `nxtrace traced --companion-cmd` |
 |---|---|---|
@@ -414,7 +442,8 @@ python -m nxtrace traced --elf /abs/path/nuttx --ws-port 8037 \
 
 ## 6. 磁盘与限制
 
-1 秒抓取的数据量：原始 75 MB + 解码产物约 355 MB，合计约 450 MB（融合模式因为就地追加，和独立模式差不多）。
+1 秒抓取的数据量：原始 75 MB + 解码产物约 355 MB，合计约 450 MB。融合模式的归档格式合并时要把硬件 trace 复制进 TAR，峰值会多占约 355 MB，写完后删掉原文件；
+放不下时自动改用 `flat`（原地追加）。
 
 - 开始抓取或解码前，cortrace 会按"抓取 ≈ 原始×6、解码 ≈ 原始×5"估算需要的空间，不够直接报错并给出数字，
   不会写到一半才失败。
@@ -466,5 +495,6 @@ cortrace capture --elf fw.elf --secs 1 --width 4 --open        # 独立模式
 cortrace capture --fuse --elf nuttx --secs 1 --tcbmap m.txt    # 融合模式
 cortrace serve --elf nuttx --fuse --tcbmap m.txt               # 网页点击（浏览器里点 Start）
 cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out m.txt  # 线程名映射
+cortrace merge -o m.tar --trace a.perfetto,machine=hw --trace b.pftrace,machine=sw,offset-ns=N  # 合并两份 trace
 cortrace --help                                                # 全部命令
 ```

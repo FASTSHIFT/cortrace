@@ -204,7 +204,7 @@ cortrace 吐给融合层的形态有两种，主/辅并存：
 ```mermaid
 flowchart LR
     subgraph OPT1["① Perfetto merge（主，零新接口）"]
-        P1["cortrace 独立产 Perfetto"] --> P2["融合层 protobuf 层拼 track + t0 平移"]
+        P1["cortrace 独立产 Perfetto"] --> P2["cortrace merge：TAR + Perfetto manifest<br>t0 偏移由 Perfetto 施加"]
     end
     subgraph OPT2["② 结构化事件流（可选增强）"]
         Q1["cortrace --emit-events<br>{ts_cycle, tid, func, enter/exit}"] --> Q2["融合层转 Perfetto<br>去重/注解/合并更精细"]
@@ -212,7 +212,10 @@ flowchart LR
 ```
 
 - **① Perfetto merge（主路径）**：cortrace 走既有 Perfetto 输出，融合层把它当一路 Perfetto
-  做 merge（拼 track + 一次 t0 平移）。**零新接口**，覆盖日常混流。去重在 Perfetto 层进行。
+  做 merge。实现用 Perfetto 官方的多文件合并（`cortrace merge`：TAR + `perfetto_manifest.json`，
+  manifest 里用 `offset_ns` 声明一次 t0 平移，两份 trace 原封不动），不再自己改字节；需要单文件时用
+  `--format flat`。**零新接口**，覆盖日常混流。去重在 Perfetto 层进行。cortrace 和 nxtrace 谁手上有两份
+  数据谁来调这个命令，合并本身与 OS、调试器的 trace 源都无关。
 - **② 结构化事件流（可选）**：需要精细去重/注解时，cortrace 新增一个 OS 无关的
   `--emit-events` writer，导出未渲染的语义事件（本质是内部 `Element` 的薄序列化，约数百行）。
   融合层拿未渲染事件做去重与注解更干净。**这是唯一可能新增的对外接口**，且对 nxtrace 无感。
