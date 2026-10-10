@@ -131,7 +131,7 @@ cmake -S . -B build -DENABLE_COVERAGE=ON
 cmake --build build --target coverage   # runs tests + gcovr, fails below the gate
 ```
 
-Set the gate threshold with `-DCORTRACE_MIN_COVERAGE=<percent>` (default 90).
+Set the gate threshold with `-DCORTRACE_MIN_COVERAGE=<percent>` (default 95).
 The HTML report lands in `build/coverage-html/`.
 
 ## Formatting
