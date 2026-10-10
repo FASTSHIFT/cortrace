@@ -112,7 +112,7 @@ cmake -S . -B build -DENABLE_COVERAGE=ON
 cmake --build build --target coverage   # 跑测试 + gcovr，低于门禁则失败
 ```
 
-门禁阈值用 `-DCORTRACE_MIN_COVERAGE=<百分比>`（默认 80）。HTML 报告在
+门禁阈值用 `-DCORTRACE_MIN_COVERAGE=<百分比>`（默认 90）。HTML 报告在
 `build/coverage-html/`。
 
 ## 代码格式化

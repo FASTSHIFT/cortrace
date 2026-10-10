@@ -171,7 +171,7 @@ add_test(NAME version_helpers
          COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/tests/version_test.cmake)
 
 # ---- coverage target with a minimum line-coverage gate --------------------
-set(CORTRACE_MIN_COVERAGE 80 CACHE STRING "Minimum line coverage percent for the gate")
+set(CORTRACE_MIN_COVERAGE 90 CACHE STRING "Minimum line coverage percent for the gate")
 add_coverage_target(cortrace_tests ${CORTRACE_MIN_COVERAGE})
 
 # ---- install rules + Debian package (cpack -G DEB) -------------------------

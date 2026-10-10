@@ -53,6 +53,10 @@ function(add_coverage_target test_target min_percent)
                 --html-details ${_html_dir}/index.html
                 --print-summary
                 --fail-under-line ${min_percent}
+                # Read only THIS build's data. Without a search path gcovr scans
+                # the whole --root, picking up stale .gcda files from any other
+                # build directory in the source tree and skewing the number.
+                ${CMAKE_BINARY_DIR}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running tests + gcovr (fail under ${min_percent}% line coverage)"
         VERBATIM)
