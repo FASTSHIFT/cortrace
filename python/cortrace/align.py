@@ -41,7 +41,12 @@ def load_tcbmap(path):
 
 
 def hw_switches_tsv(path, name2pid):
-    """[(ns, pid)] from cortrace-decode --nx-runs-out ('<tick>\\t<name>' per run)."""
+    """[(ns, thread)] from a switch log: '<ns>\\t<name>' per switch-in.
+
+    This is the neutral file any producer can write (cortrace-decode
+    --nx-runs-out, nxtrace --format switches, a QEMU converter, ...). The thread
+    is the pid in a trailing "(pid N)", else the name mapped through `name2pid`
+    (a tcbmap), else the raw name. Sorted by time."""
     out = []
     with open(path, encoding="utf-8") as f:
         for ln in f:
@@ -52,17 +57,46 @@ def hw_switches_tsv(path, name2pid):
     return out
 
 
+load_switch_log = hw_switches_tsv  # the neutral name; the old one stays for callers
+
 NOTE_RE = re.compile(r"\[(\d+)\]\s+cpu=(\d+)\s+pid=(\d+)\s+type=(\d+)")
 
 
-def note_switches(path, resume_type):
+def note_switches(path, resume_type, name2pid=None):
+    """[(ns, pid)] of the switch-ins in `path`: an nxtrace `--format dump`
+    text, or (when it holds no such lines) a switch log TSV."""
     out = []
+    is_dump = False
     with open(path, encoding="utf-8", errors="replace") as f:
         for ln in f:
             m = NOTE_RE.match(ln)
-            if m and int(m.group(4)) == resume_type:
-                out.append((int(m.group(1)), int(m.group(3))))
+            if m:
+                is_dump = True
+                if int(m.group(4)) == resume_type:
+                    out.append((int(m.group(1)), int(m.group(3))))
+    if not is_dump:
+        try:
+            out = load_switch_log(path, name2pid or {})
+        except ValueError:  # neither a dump nor a switch log
+            out = []
     return out
+
+
+def fit_offset(ref, other, tol_ns):
+    """Constant offset (other_ns - ref_ns) between two switch logs.
+
+    Returns (offset, [(ref_t, residual)], how) with how = "order" (the two
+    logs hold the same switches in the same order, paired one to one) or "fit"
+    (nearest neighbour per thread, for logs that lost switches);
+    (None, [], None) when no common offset exists.
+    """
+    off, res = sequence_pair(ref, other)
+    if off is not None:
+        return off, res, "order"
+    off, res = global_fit(ref, other, tol_ns)
+    if off is None or not res:
+        return None, [], None
+    return off, res, "fit"
 
 
 def sequence_pair(hw, notes):
@@ -148,7 +182,7 @@ def main(argv=None):
 
     name2pid = load_tcbmap(a.tcbmap)
     hw = hw_switches_tsv(a.hw_runs, name2pid)
-    notes = note_switches(a.note, a.resume_type)
+    notes = note_switches(a.note, a.resume_type, name2pid)
     print(f"hardware switches: {len(hw)}   note switches: {len(notes)}")
     if not hw or not notes:
         sys.exit("nothing to compare")
@@ -160,10 +194,8 @@ def main(argv=None):
     # Both traces come from ONE capture, so when they hold the same switches in the
     # same order (same count, same thread sequence) pair them one-to-one: exact and
     # immune to the aliasing a periodic workload causes in the nearest-neighbour fit.
-    off, res = sequence_pair(hw, notes)
-    if off is None:
-        off, res = global_fit(hw, notes, a.tol_us * 1000)
-    else:
+    off, res, how = fit_offset(hw, notes, a.tol_us * 1000)
+    if how == "order":
         print("pairing        : one-to-one by order (identical thread sequence)")
     if off is None or not res:
         print(

@@ -153,3 +153,19 @@ def test_main_requires_hw_runs(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         run_main(monkeypatch, ["--note", note])
     assert e.value.code == 2
+
+
+def test_note_switches_reads_a_switch_log_when_the_file_is_not_a_dump(tmp_path):
+    p = write(tmp_path, "sw.tsv", "300\tidle (pid 0)\n100\tworker_io\n")
+    assert ac.note_switches(p, 3, {"worker_io": 4}) == [(100, 4), (300, 0)]
+    # neither a dump nor a switch log: nothing to compare rather than a crash
+    assert not ac.note_switches(write(tmp_path, "junk.txt", "no notes here\n"), 3)
+
+
+def test_fit_offset_reports_how_it_paired():
+    ref = [(100, 1), (200, 2), (300, 1)]
+    off, res, how = ac.fit_offset(ref, [(1100, 1), (1200, 2), (1300, 1)], 30_000)
+    assert (off, how) == (1000, "order") and len(res) == 3
+    off, res, how = ac.fit_offset(ref, [(1100, 1), (1300, 1)], 50)  # one lost
+    assert (off, how) == (1000, "fit")
+    assert ac.fit_offset(ref, [(5, 9)], 10) == (None, [], None)
