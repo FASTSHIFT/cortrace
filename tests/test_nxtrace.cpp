@@ -259,7 +259,8 @@ TEST(nxtrace_load_tcb_map_parses_file)
 {
     // Write a tcbmap file with a comment, a blank line, a malformed line, and
     // two good entries (one with a name, one name-less).
-    const char* path = "/tmp/cortrace_test_tcbmap.txt";
+    const std::string path_str = cortrace_test::temp_path("tcbmap.txt");
+    const char* path = path_str.c_str();
     {
         std::ofstream f(path);
         f << "# tcb\tpid\tname\n";
@@ -284,7 +285,7 @@ TEST(nxtrace_load_tcb_map_parses_file)
 
 TEST(nxtrace_load_tcb_map_missing_file_is_empty)
 {
-    auto m = load_tcb_map("/tmp/does_not_exist_cortrace_xyz.txt");
+    auto m = load_tcb_map("/nonexistent/dir/cortrace_xyz.txt");
     CHECK_EQ((long)m.size(), 0L);
 }
 

@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: MIT
 #include "cortrace/symbols.hpp"
 #include "test_framework.hpp"
+#include <cstdio>
+#include <stdexcept>
+#include <string>
 
 using cortrace::SymbolTable;
 
@@ -58,4 +61,67 @@ TEST(symbols_unsorted_add_then_finalize)
     t.finalize();
     CHECK_EQ(t.size(), static_cast<std::size_t>(3));
     CHECK_EQ(t.function_at(0x2500), std::string("beta"));
+}
+
+namespace {
+// Write `text` to a scratch file and return its path.
+std::string write_file(const std::string& name, const std::string& text)
+{
+    const std::string path = cortrace_test::temp_path(name);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    return path;
+}
+} // namespace
+
+TEST(symbols_load_nm_keeps_only_text_and_weak_symbols)
+{
+    const std::string path = write_file("nm_ok.txt",
+        "08000100 T reset_handler\n"
+        "08000200 t local_helper\n"
+        "08000300 W weak_hook\n"
+        "08000400 w weak_local\n"
+        "20000000 D data_symbol\n" // data: dropped
+        "20000100 B bss_symbol\n" // bss: dropped
+        "         U undefined_symbol\n" // no address: unparsable, dropped
+        "not an nm line at all\n");
+    SymbolTable t;
+    CHECK_EQ(t.load_nm(path), static_cast<std::size_t>(4));
+    CHECK_EQ(t.size(), static_cast<std::size_t>(4));
+    CHECK_EQ(t.function_at(0x08000150), std::string("reset_handler"));
+    CHECK_EQ(t.function_at(0x08000450), std::string("weak_local"));
+    CHECK(t.is_function_entry(0x08000300));
+    CHECK(!t.is_function_entry(0x20000000)); // data symbol never became a function
+    std::remove(path.c_str());
+}
+
+TEST(symbols_load_nm_sorts_an_unsorted_file)
+{
+    const std::string path = write_file("nm_unsorted.txt", "08000300 T gamma\n08000100 T alpha\n");
+    SymbolTable t;
+    t.load_nm(path);
+    CHECK_EQ(t.function_at(0x08000200), std::string("alpha")); // finalize() ran
+    std::remove(path.c_str());
+}
+
+TEST(symbols_load_nm_missing_file_throws)
+{
+    SymbolTable t;
+    bool threw = false;
+    try {
+        t.load_nm("/nonexistent/dir/no.nm");
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("no.nm") != std::string::npos;
+    }
+    CHECK(threw);
+}
+
+TEST(symbols_load_nm_empty_file_adds_nothing)
+{
+    const std::string path = write_file("nm_empty.txt", "");
+    SymbolTable t;
+    CHECK_EQ(t.load_nm(path), static_cast<std::size_t>(0));
+    CHECK(t.empty());
+    std::remove(path.c_str());
 }

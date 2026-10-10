@@ -16,7 +16,7 @@ namespace {
 // Write a temp time.bin of little-endian uint64 ns values and return its path.
 std::string write_tb(const std::vector<uint64_t>& ns)
 {
-    std::string path = "/tmp/cortrace_tb_test.bin";
+    std::string path = cortrace_test::temp_path("tb.bin");
     FILE* f = std::fopen(path.c_str(), "wb");
     std::fwrite(ns.data(), sizeof(uint64_t), ns.size(), f);
     std::fclose(f);
@@ -198,4 +198,79 @@ TEST(hybrid_time_without_rates_falls_back_to_etm_timestamp)
     std::vector<SliceEvent> s = { hy_ev(75, 0), hy_ev(150, 100) };
     auto out = apply_hybrid_time(s, 0.0, 150e6);
     CHECK_EQ((long long)out[0].tick, 75LL); // raw counts
+}
+
+// ---- cycle-count time base ---------------------------------------------------
+
+TEST(cycle_time_converts_cycles_to_ns)
+{
+    // 150 MHz: 150 cycles = 1000 ns.
+    std::vector<SliceEvent> s = { hy_ev(0, 0), hy_ev(0, 150), hy_ev(0, 300) };
+    auto out = apply_cycle_time(s, 150e6);
+    CHECK_EQ((long long)out[0].tick, 0LL);
+    CHECK_EQ((long long)out[1].tick, 1000LL);
+    CHECK_EQ((long long)out[2].tick, 2000LL);
+}
+
+TEST(cycle_time_without_a_rate_keeps_raw_cycles)
+{
+    std::vector<SliceEvent> s = { hy_ev(0, 7), hy_ev(0, 9) };
+    auto out = apply_cycle_time(s, 0.0);
+    CHECK_EQ((long long)out[0].tick, 7LL);
+    CHECK_EQ((long long)out[1].tick, 9LL);
+}
+
+TEST(cycle_time_never_moves_backwards)
+{
+    // A decode glitch makes the counter go back: hold the previous tick.
+    std::vector<SliceEvent> s = { hy_ev(0, 300), hy_ev(0, 150), hy_ev(0, 450) };
+    auto out = apply_cycle_time(s, 150e6);
+    CHECK_EQ((long long)out[0].tick, 2000LL);
+    CHECK_EQ((long long)out[1].tick, 2000LL); // clamped, not 1000
+    CHECK_EQ((long long)out[2].tick, 3000LL);
+}
+
+TEST(cycle_time_of_nothing_is_nothing) { CHECK(apply_cycle_time({}, 150e6).empty()); }
+
+// ---- hybrid corner cases -----------------------------------------------------
+
+TEST(hybrid_time_of_nothing_is_nothing) { CHECK(apply_hybrid_time({}, 75e6, 150e6).empty()); }
+
+TEST(hybrid_time_without_any_timestamp_is_pure_cycle_time_from_zero)
+{
+    std::vector<SliceEvent> s = { hy_ev(0, 100), hy_ev(0, 250), hy_ev(0, 400) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[0].tick, 0LL);
+    CHECK_EQ((long long)out[1].tick, 1000LL); // 150 cycles later
+    CHECK_EQ((long long)out[2].tick, 2000LL);
+}
+
+TEST(hybrid_time_cycle_counter_going_back_inside_a_group_holds_the_base)
+{
+    // Same TS group, but the cycle counter reads lower than at the anchor.
+    std::vector<SliceEvent> s = { hy_ev(75, 300), hy_ev(75, 150) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[0].tick, 1000LL);
+    CHECK_EQ((long long)out[1].tick, 1000LL); // not before the anchor
+}
+
+TEST(hybrid_time_group_without_timestamp_after_one_stays_monotonic)
+{
+    // The TS drops back to 0 after a real one (a decoder resync): the group
+    // without a timestamp is placed from the first real anchor by cycles, and
+    // must not land before what was already emitted.
+    std::vector<SliceEvent> s = { hy_ev(75, 100), hy_ev(75, 200), hy_ev(0, 150) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[0].tick, 1000LL);
+    CHECK_EQ((long long)out[1].tick, 1666LL); // +100 cycles = 666 ns
+    CHECK(out[2].tick >= out[1].tick);
+}
+
+TEST(hybrid_time_events_before_the_first_timestamp_clamp_at_zero)
+{
+    // Counting back from the first anchor would go below zero.
+    std::vector<SliceEvent> s = { hy_ev(0, 0), hy_ev(75, 3000) };
+    auto out = apply_hybrid_time(s, 75e6, 150e6);
+    CHECK_EQ((long long)out[0].tick, 0LL);
+    CHECK_EQ((long long)out[1].tick, 1000LL);
 }

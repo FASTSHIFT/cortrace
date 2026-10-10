@@ -10,6 +10,7 @@
 #include "test_framework.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
@@ -151,4 +152,70 @@ TEST(perfetto_single_track_backcompat)
     Parsed p = parse(encode_perfetto_trace(slices, "ETM callstack", 0x1001));
     CHECK_EQ((long)p.tracks.size(), 1L);
     CHECK_EQ(p.events[0x1001], 2);
+}
+
+namespace {
+std::string read_file(const std::string& path)
+{
+    std::string out;
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return out;
+    char buf[4096];
+    std::size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+        out.append(buf, n);
+    std::fclose(f);
+    return out;
+}
+} // namespace
+
+TEST(perfetto_slice_names_and_timestamps_are_in_the_encoding)
+{
+    std::vector<SliceEvent> slices = {
+        { 123456789, 0, true, "name_that_must_appear", 0 },
+        { 123456999, 0, false, "end_has_no_name", 0 },
+    };
+    const std::string bytes = encode_perfetto_trace(slices);
+    CHECK(bytes.find("name_that_must_appear") != std::string::npos);
+    CHECK(bytes.find("end_has_no_name") == std::string::npos); // only begins carry a name
+    CHECK(bytes.find("ETM callstack") != std::string::npos); // default track name
+}
+
+TEST(perfetto_empty_slice_list_still_describes_the_track)
+{
+    Parsed p = parse(encode_perfetto_trace({}, "only a track", 0x77));
+    CHECK_EQ((long)p.tracks.size(), 1L);
+    CHECK(p.events.empty());
+}
+
+TEST(perfetto_write_single_track_file_matches_the_encoding)
+{
+    std::vector<SliceEvent> slices = { { 5, 0, true, "f", 0 }, { 9, 0, false, "", 0 } };
+    const std::string path = cortrace_test::temp_path("single.perfetto");
+    CHECK(write_perfetto_trace(path, slices, "trk", 0x42));
+    CHECK_EQ(read_file(path), encode_perfetto_trace(slices, "trk", 0x42));
+    std::remove(path.c_str());
+}
+
+TEST(perfetto_write_multi_track_file_matches_the_encoding)
+{
+    std::vector<SliceEvent> slices = { { 5, 0, true, "f", 0 }, { 9, 0, false, "", 0 } };
+    std::map<int, std::string> tracks = { { 0, "main" } };
+    const std::string path = cortrace_test::temp_path("multi.perfetto");
+    CHECK(write_perfetto_trace_multi(path, slices, tracks));
+    CHECK_EQ(read_file(path), encode_perfetto_trace_multi(slices, tracks));
+    std::remove(path.c_str());
+}
+
+TEST(perfetto_write_reports_an_unwritable_path)
+{
+    std::vector<SliceEvent> slices = { { 1, 0, true, "f", 0 } };
+    CHECK(!write_perfetto_trace("/nonexistent/dir/x.perfetto", slices));
+    CHECK(!write_perfetto_trace_multi("/nonexistent/dir/x.perfetto", slices, { { 0, "m" } }));
+}
+
+TEST(perfetto_multi_track_without_tracks_or_slices_is_empty)
+{
+    CHECK(encode_perfetto_trace_multi({}, {}).empty());
 }

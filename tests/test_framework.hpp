@@ -9,10 +9,13 @@
 #define CORTRACE_TEST_FRAMEWORK_HPP
 
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace cortrace_test {
 
@@ -38,6 +41,14 @@ struct Registrar {
 struct Failure {
     std::string msg;
 };
+
+// A scratch file name that is unique per process, in $TMPDIR (else /tmp).
+inline std::string temp_path(const std::string& name)
+{
+    const char* dir = std::getenv("TMPDIR");
+    return std::string(dir && *dir ? dir : "/tmp") + "/cortrace_test_" + std::to_string(::getpid())
+        + "_" + name;
+}
 
 inline int& failure_count()
 {
