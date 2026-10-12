@@ -1,9 +1,11 @@
-"""capture -- grab a raw trace from the FPGA streamer, then decode or fuse it.
+"""capture -- grab a raw trace from the FPGA streamer, then decode it.
 
   1. (optional) set the TPIU port width on the FPGA        (fpga.ctrl set-width)
   2. stream N seconds of UDP trace into a file              (cortrace-grab)
-  3. hardware-only: decode raw -> Perfetto                  (cortrace-decode)
-     --fuse:        decode + NuttX notes fused on one axis  (cortrace fuse)
+  3. decode raw -> Perfetto                                 (cortrace-decode)
+     --notes: also write the software trace bytes that ride on an ITM stimulus
+              port (notes_<tag>.bin) and the hardware thread-switch log
+              (hwruns_<tag>.tsv), the inputs of `nxtrace merge`
   4. optionally open the result in ui.perfetto.dev
 
 The output directory is always given by the user (--out-dir or
@@ -21,11 +23,12 @@ import sys
 import tempfile
 import time
 
-from . import fuse as fuse_mod
-from . import merge, runstore
+from . import runstore
 from ._paths import find_binary
 from .fpga import ctrl
 from .perfetto_open import main as perfetto_open_main
+
+DEFAULT_TSGEN_HZ = 75e6  # ETM timestamp clock of the STM32H7 bring-up (HCLK)
 
 
 def add_capture_options(ap):
@@ -55,24 +58,34 @@ def add_capture_options(ap):
     )
     ap.add_argument("--tag", default=None, help="file name suffix (default: timestamp)")
     ap.add_argument(
-        "--fuse", action="store_true", help="also decode the NuttX notes and fuse"
+        "--notes",
+        action="store_true",
+        help="also write notes_<tag>.bin (the bytes on the ITM stimulus port) and "
+        "hwruns_<tag>.tsv (the hardware thread switches) for `nxtrace merge`; "
+        "uses the hybrid time base",
     )
     ap.add_argument(
-        "--merge-format",
-        choices=merge.FORMATS,
-        default="archive",
-        help="with --fuse: archive = fused_<tag>.tar (Perfetto manifest, traces "
-        "untouched; default), flat = one fused_<tag>.perfetto",
+        "--itm-port",
+        type=int,
+        default=1,
+        help="ITM stimulus port the firmware writes its notes to (default: "
+        "%(default)s; the Vela coresight note driver uses 0)",
     )
     ap.add_argument("--nm", default="arm-none-eabi-nm", help="nm for the ELF symbols")
     ap.add_argument(
         "--time-base",
         choices=("cycle", "etm", "hybrid"),
         default="cycle",
-        help="hardware-only time base (--fuse always uses hybrid)",
+        help="time base of the hardware trace (--notes always uses hybrid)",
     )
     ap.add_argument("--sysclk-hz", type=float, default=150e6)
-    ap.add_argument("--tsgen-hz", type=float, default=None)
+    ap.add_argument(
+        "--tsgen-hz",
+        type=float,
+        default=None,
+        help="ETM timestamp clock (needed by the etm and hybrid time bases; "
+        f"--notes defaults to {DEFAULT_TSGEN_HZ:g})",
+    )
     ap.add_argument("--nx-switch-stream", type=int, default=1)
     ap.add_argument("--tcbmap", default=None, help="thread-name map (cortrace tcbmap)")
     ap.add_argument("--phase", default=None, help="lock deframe phase, e.g. 1,0")
@@ -81,15 +94,14 @@ def add_capture_options(ap):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         prog="cortrace capture",
-        description="capture -> decode (or fuse) -> open in Perfetto",
+        description="capture -> decode -> open in Perfetto",
     )
     add_capture_options(ap)
     ap.add_argument(
         "--raw-in", default=None, help="skip the capture; use this raw file"
     )
     ap.add_argument("--open", action="store_true", help="open the result in Perfetto")
-    a, extra = ap.parse_known_args(argv)
-    return finish_args(ap, a), extra
+    return finish_args(ap, ap.parse_args(argv))
 
 
 def finish_args(ap, a):
@@ -125,25 +137,35 @@ def grab(a, raw):
         sys.exit("cortrace-grab failed")
 
 
+def note_paths(a):
+    """(note stream, hardware switch log) written by --notes."""
+    return (
+        os.path.join(a.out_dir, f"notes_{a.tag}.bin"),
+        os.path.join(a.out_dir, f"hwruns_{a.tag}.tsv"),
+    )
+
+
+def time_base_args(a):
+    """cortrace-decode options of the time base."""
+    base = "hybrid" if a.notes else a.time_base
+    tsgen = a.tsgen_hz or (DEFAULT_TSGEN_HZ if a.notes else None)
+    if base == "cycle":
+        return ["--cycle-time", "--sysclk-hz", str(a.sysclk_hz)]
+    if not tsgen:
+        sys.exit(f"--time-base {base} needs --tsgen-hz")
+    if base == "etm":
+        return ["--etm-time", "--tsgen-hz", str(tsgen)]
+    return [
+        "--hybrid-time",
+        "--tsgen-hz",
+        str(tsgen),
+        "--sysclk-hz",
+        str(a.sysclk_hz),
+    ]
+
+
 def decode_command(a, raw, perf, syms):
-    """cortrace-decode command line for a hardware-only decode."""
-    width = a.width or 4
-    if a.time_base == "cycle":
-        base = ["--cycle-time", "--sysclk-hz", str(a.sysclk_hz)]
-    elif a.time_base == "etm":
-        if not a.tsgen_hz:
-            sys.exit("--time-base etm needs --tsgen-hz")
-        base = ["--etm-time", "--tsgen-hz", str(a.tsgen_hz)]
-    else:
-        if not a.tsgen_hz:
-            sys.exit("--time-base hybrid needs --tsgen-hz")
-        base = [
-            "--hybrid-time",
-            "--tsgen-hz",
-            str(a.tsgen_hz),
-            "--sysclk-hz",
-            str(a.sysclk_hz),
-        ]
+    """cortrace-decode command line."""
     cmd = [
         find_binary("CORTRACE_DECODE", "cortrace-decode"),
         raw,
@@ -152,13 +174,19 @@ def decode_command(a, raw, perf, syms):
         a.elf,
         "--raw",
         "--trace-width",
-        str(width),
+        str(a.width or 4),
         "--memory-limit-mb",
         "0",
         "--nx-switch-stream",
         str(a.nx_switch_stream),
     ]
-    cmd += base + ["--perf", perf]
+    cmd += time_base_args(a) + ["--perf", perf]
+    if a.notes:
+        notes, runs = note_paths(a)
+        # The notes are stamped with the 32-bit DWT_CYCCNT; the decoder widens
+        # it to 64 bits across counter wraps (every ~28.6 s at 150 MHz).
+        cmd += ["--itm-note-port", str(a.itm_port), "--itm-note-unwrap"]
+        cmd += ["--itm-note-out", notes, "--nx-runs-out", runs]
     if a.phase:
         cmd += ["--phase", a.phase]
     if a.tcbmap:
@@ -167,34 +195,32 @@ def decode_command(a, raw, perf, syms):
 
 
 def decode_hw(a, raw):
-    """Hardware-only decode; returns the Perfetto path."""
+    """Decode `raw`; returns the hardware Perfetto path."""
     perf = os.path.join(a.out_dir, f"hw_{a.tag}.perfetto")
     syms = os.path.join(tempfile.gettempdir(), f"cortrace_capture_{os.getpid()}.nm")
     with open(syms, "w", encoding="utf-8") as f:
         subprocess.run([a.nm, "-n", a.elf], stdout=f, check=True)
     proc = run_cmd(decode_command(a, raw, perf, syms), capture_output=True, text=True)
+    keys = ("stream health", "begins / ends", "wrote", "error", "itm notes: port")
     for line in (proc.stderr + proc.stdout).splitlines():
-        if any(k in line for k in ("stream health", "begins / ends", "wrote", "error")):
+        if any(k in line for k in keys):
             log("  " + line.strip())
     if proc.returncode != 0 or not os.path.isfile(perf):
         sys.exit("decode failed")
+    if a.notes:
+        notes, runs = note_paths(a)
+        if not os.path.isfile(notes) or os.path.getsize(notes) == 0:
+            log(
+                f"warning: no note bytes on ITM port {a.itm_port} -- does the "
+                "firmware write its notes there, and is the ITM enabled?"
+            )
+        log(f"notes: {notes}")
+        log(f"hardware switches: {runs}")
     return perf
 
 
-def fuse_args(a, raw, extra):
-    """Arguments handing the raw capture to `cortrace fuse`."""
-    args = ["--raw", raw, "--elf", a.elf, "--out-dir", a.out_dir, "--tag", a.tag]
-    args += ["--width", str(a.width or 4), "--sysclk-hz", str(a.sysclk_hz)]
-    args += ["--nm", a.nm, "--merge-format", a.merge_format]
-    if a.tsgen_hz:
-        args += ["--tsgen-hz", str(a.tsgen_hz)]
-    if a.tcbmap:
-        args += ["--tcbmap", a.tcbmap]
-    return args + list(extra)
-
-
-def run(a, raw_in=None, extra=()):
-    """Run the whole pipeline; returns the path of the file to look at."""
+def run(a, raw_in=None):
+    """Run the whole pipeline; returns the hardware Perfetto path."""
     if raw_in:
         raw = os.path.abspath(raw_in)
         if not os.path.isfile(raw):
@@ -210,23 +236,12 @@ def run(a, raw_in=None, extra=()):
     if not raw_in:
         raw = os.path.join(a.out_dir, f"raw_{a.tag}.bin")
         grab(a, raw)
-    if a.fuse:
-        rc = fuse_mod.main(fuse_args(a, raw, extra))
-        if rc != 0:
-            sys.exit("fuse failed")
-        # fuse falls back to the flat format when the disk cannot hold the archive
-        for fmt in (a.merge_format, "flat", "archive"):
-            fused = os.path.join(a.out_dir, fuse_mod.fused_name(a.tag, fmt))
-            if os.path.isfile(fused):
-                return fused
-        log("clock alignment failed: no fused file, using the hardware trace")
-        return os.path.join(a.out_dir, f"hw_{a.tag}.perfetto")
     return decode_hw(a, raw)
 
 
 def main(argv=None):
-    a, extra = parse_args(argv)
-    result = run(a, raw_in=a.raw_in, extra=extra)
+    a = parse_args(argv)
+    result = run(a, raw_in=a.raw_in)
     print(result)
     if a.open:
         return perfetto_open_main([result, "--keep"])

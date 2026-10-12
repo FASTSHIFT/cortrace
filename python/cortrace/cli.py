@@ -1,4 +1,4 @@
-"""`cortrace` command line: one entry point for decode, capture and fusion.
+"""`cortrace` command line: one entry point for decode and capture.
 
 This module only picks the sub-command (argparse sub-parsers) and hands the
 rest of the command line to that command's own argparse parser, so every
@@ -14,11 +14,8 @@ from . import __version__, banner
 # command -> one-line summary shown by `cortrace --help`
 SUMMARIES = {
     "decode": "run cortrace-decode (ETM/DWT/ITM -> Perfetto), arguments passed through",
-    "capture": "grab a raw capture from the FPGA streamer, decode (or --fuse) and open",
+    "capture": "grab a raw capture from the FPGA streamer, decode it and open",
     "serve": 'Perfetto "Record" target: press Start in the UI to capture and view',
-    "fuse": "one raw capture -> hardware trace + NuttX notes on one time axis",
-    "align": "fit the clock offset between hardware and note thread switches",
-    "merge": "put Perfetto traces from different producers on one timeline",
     "tcbmap": "dump the live pid -> thread-name map through OpenOCD",
     "open": "open a Perfetto trace in ui.perfetto.dev",
     "fpga": "FPGA streamer tools: ctrl (CSR writes), net (find the link), health",
@@ -34,8 +31,8 @@ FPGA_TOOLS = {
 }
 
 # Commands that run for a while and are driven by a person at a terminal; the
-# short helpers (version, align, tcbmap, open, fpga, decode) stay quiet.
-BANNER_COMMANDS = ("capture", "serve", "fuse")
+# short helpers (version, tcbmap, open, fpga, decode) stay quiet.
+BANNER_COMMANDS = ("capture", "serve")
 
 
 def _decode(args):
@@ -64,9 +61,6 @@ COMMANDS = {
     "decode": _decode,
     "capture": _lazy("capture"),
     "serve": _lazy("serve"),
-    "fuse": _lazy("fuse"),
-    "align": _lazy("align"),
-    "merge": _lazy("merge"),
     "tcbmap": _lazy("tcbmap"),
     "open": _lazy("perfetto_open"),
 }
@@ -93,7 +87,7 @@ def _banner_option(default):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="cortrace",
-        description="Cortex-M ETM/DWT/ITM trace: capture, decode, fuse and view.",
+        description="Cortex-M ETM/DWT/ITM trace: capture, decode and view.",
         epilog="Run `cortrace <command> --help` for the options of a command. "
         "The logo is printed only on a terminal.",
         parents=[_banner_option(False)],

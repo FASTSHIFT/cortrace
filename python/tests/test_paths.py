@@ -22,3 +22,14 @@ def test_missing_binary_returns_bare_name(monkeypatch):
     assert _paths.find_binary("X_BIN", "no-such-tool-xyz", dev_dirs=()) == (
         "no-such-tool-xyz"
     )
+
+
+def test_development_build_directory_is_searched(monkeypatch, tmp_path):
+    build = tmp_path / "build-rel"
+    build.mkdir()
+    tool = build / "devtool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.delenv("X_BIN", raising=False)
+    monkeypatch.setenv("PATH", os.devnull)
+    monkeypatch.setattr(_paths, "_REPO", str(tmp_path))
+    assert _paths.find_binary("X_BIN", "devtool", dev_dirs=("build-rel",)) == str(tool)

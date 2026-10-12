@@ -3,10 +3,9 @@
 Starts a fake Perfetto `traced` (record_bridge) behind a WebSocket relay
 (wsrelay). In ui.perfetto.dev choose "Record new trace" -> "Linux" ->
 WebSocket 127.0.0.1:<port> and press Start: the capture pipeline runs (grab,
-decode or fuse) and the resulting trace is streamed back into the same page.
+decode) and the resulting trace is streamed back into the same page.
 
-Everything is local and stdlib-only; no tracebox and no pynuttx are needed for
-the hardware-only mode (--fuse needs nxtrace).
+Everything is local and stdlib-only; no tracebox is needed.
 """
 
 import argparse
@@ -26,7 +25,6 @@ def parse_args(argv=None):
         description="serve a Perfetto Record target that captures on Start",
     )
     capture.add_capture_options(ap)
-    ap.set_defaults(merge_format="flat")
     ap.add_argument("--port", type=int, default=8037, help="WebSocket port")
     ap.add_argument(
         "--allow-origin",
@@ -35,12 +33,7 @@ def parse_args(argv=None):
         help="extra browser Origin to accept (repeatable)",
     )
     ap.add_argument("--quiet", action="store_true")
-    a, extra = ap.parse_known_args(argv)
-    if a.merge_format != "flat":
-        ap.error("serve streams TracePackets to the UI: use --merge-format flat")
-    a = capture.finish_args(ap, a)
-    a.extra = extra
-    return a
+    return capture.finish_args(ap, ap.parse_args(argv))
 
 
 def make_capture_cb(a):
@@ -48,7 +41,7 @@ def make_capture_cb(a):
 
     def run():
         a.tag = time.strftime("%Y%m%d-%H%M%S")  # one file set per Start
-        result = capture.run(a, extra=a.extra)
+        result = capture.run(a)
         return record_bridge.load_trace_packets(result)
 
     return run

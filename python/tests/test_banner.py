@@ -60,14 +60,14 @@ def run_cli(monkeypatch, argv):
     return cli.main(argv), bool(shown)
 
 
-@pytest.mark.parametrize("cmd", ["capture", "serve", "fuse"])
+@pytest.mark.parametrize("cmd", ["capture", "serve"])
 def test_long_running_commands_show_it(monkeypatch, cmd):
     assert run_cli(monkeypatch, [cmd, "--elf", "x"]) == (0, True)
 
 
 @pytest.mark.parametrize(
     "argv",
-    [["align"], ["tcbmap"], ["open"], ["decode"], ["version"], ["fpga", "net"]],
+    [["tcbmap"], ["open"], ["decode"], ["version"], ["fpga", "net"]],
 )
 def test_helper_commands_stay_quiet(monkeypatch, argv):
     assert run_cli(monkeypatch, argv)[1] is False

@@ -15,25 +15,19 @@ def test_parse_requires_output_dir(monkeypatch, capsys):
     assert "--out-dir is required" in capsys.readouterr().err
 
 
-def test_parse_defaults_and_forwarding(tmp_path):
-    a = serve.parse_args(argv(tmp_path, "--port", "9000", "--pynuttx", "/p"))
-    assert a.port == 9000 and a.extra == ["--pynuttx", "/p"]
+def test_parse_defaults_and_unknown_options(tmp_path, capsys):
+    assert serve.parse_args(argv(tmp_path, "--port", "9000")).port == 9000
     assert serve.parse_args(argv(tmp_path)).port == 8037
-
-
-def test_serve_always_streams_the_flat_format(tmp_path, capsys):
-    """The Record flow hands TracePackets to the UI; an archive cannot be that."""
-    assert serve.parse_args(argv(tmp_path)).merge_format == "flat"
     with pytest.raises(SystemExit):
-        serve.parse_args(argv(tmp_path, "--merge-format", "archive"))
-    assert "--merge-format flat" in capsys.readouterr().err
+        serve.parse_args(argv(tmp_path, "--fuse"))
+    assert "unrecognized arguments: --fuse" in capsys.readouterr().err
 
 
 def test_capture_callback_runs_the_pipeline_with_a_fresh_tag(monkeypatch, tmp_path):
-    a = serve.parse_args(argv(tmp_path, "--fuse"))
+    a = serve.parse_args(argv(tmp_path))
     tags = []
     monkeypatch.setattr(
-        serve.capture, "run", lambda args, extra=(): tags.append(args.tag) or "/r.pf"
+        serve.capture, "run", lambda args: tags.append(args.tag) or "/r.pf"
     )
     monkeypatch.setattr(serve.record_bridge, "load_trace_packets", lambda p: [p])
     assert serve.make_capture_cb(a)() == ["/r.pf"]

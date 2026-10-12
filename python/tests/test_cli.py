@@ -50,7 +50,9 @@ def test_unknown_option_before_the_command_is_rejected(capsys):
 
 def test_dispatch_passes_the_rest_through_untouched_and_in_order(monkeypatch):
     seen = {}
-    monkeypatch.setitem(cli.COMMANDS, "fuse", lambda args: seen.update(args=args) or 7)
+    monkeypatch.setitem(
+        cli.COMMANDS, "tcbmap", lambda args: seen.update(args=args) or 7
+    )
     rest = [
         "--raw",
         "x",
@@ -63,7 +65,7 @@ def test_dispatch_passes_the_rest_through_untouched_and_in_order(monkeypatch):
         "--tcbmap",
         "m",
     ]
-    assert cli.main(["fuse"] + rest) == 7
+    assert cli.main(["tcbmap"] + rest) == 7
     assert seen["args"] == rest
 
 
@@ -84,9 +86,9 @@ def test_none_return_means_success(monkeypatch):
 def test_commands_own_help_is_reached(capsys):
     """-h after the command belongs to the command, not to cortrace."""
     with pytest.raises(SystemExit) as e:
-        cli.main(["align", "--help"])
+        cli.main(["capture", "--help"])
     assert e.value.code == 0
-    assert "--hw-runs" in capsys.readouterr().out
+    assert "--notes" in capsys.readouterr().out
 
 
 def test_decode_execs_the_binary_with_the_arguments(monkeypatch):

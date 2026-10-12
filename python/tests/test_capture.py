@@ -1,6 +1,7 @@
 import types
 
 import pytest
+
 from cortrace import capture
 
 
@@ -23,7 +24,7 @@ def test_output_dir_must_be_given_explicitly(capsys):
 
 def test_output_dir_from_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CORTRACE_OUT_DIR", str(tmp_path / "o"))
-    a, _ = parse("--iface", "eth0")
+    a = parse("--iface", "eth0")
     assert a.out_dir == str(tmp_path / "o")
 
 
@@ -31,18 +32,22 @@ def test_iface_needed_unless_raw_in(tmp_path, capsys):
     with pytest.raises(SystemExit):
         parse("--out-dir", str(tmp_path))
     assert "--iface" in capsys.readouterr().err
-    a, _ = parse("--out-dir", str(tmp_path), "--raw-in", "r.bin")
+    a = parse("--out-dir", str(tmp_path), "--raw-in", "r.bin")
     assert a.iface is None
 
 
-def test_unknown_options_are_forwarded(tmp_path):
-    a, extra = parse("--out-dir", str(tmp_path), "--raw-in", "r", "--pynuttx", "/p")
-    assert extra == ["--pynuttx", "/p"]
+def test_defaults_and_unknown_options(tmp_path, capsys):
+    a = parse("--out-dir", str(tmp_path), "--raw-in", "r")
     assert a.tag  # defaulted to a timestamp
+    assert not a.notes and a.itm_port == 1
+    with pytest.raises(SystemExit) as e:
+        parse("--out-dir", str(tmp_path), "--raw-in", "r", "--fuse")
+    assert e.value.code == 2
+    assert "unrecognized arguments: --fuse" in capsys.readouterr().err
 
 
-def args(tmp_path, **kw):
-    a, _ = parse("--out-dir", str(tmp_path), "--iface", "eth0", "--tag", "t")
+def args(tmp_path, *extra, **kw):
+    a = parse("--out-dir", str(tmp_path), "--iface", "eth0", "--tag", "t", *extra)
     for key, value in kw.items():
         setattr(a, key, value)
     return a
@@ -59,6 +64,7 @@ def test_decode_command_time_bases(tmp_path, base, expect):
     assert cmd[cmd.index("--phase") + 1] == "1,0"
     assert cmd[cmd.index("--nx-tcbmap") + 1] == "m.txt"
     assert cmd[cmd.index("--trace-width") + 1] == "4"
+    assert "--itm-note-out" not in cmd  # no notes unless asked
 
 
 @pytest.mark.parametrize("base", ["etm", "hybrid"])
@@ -66,6 +72,25 @@ def test_decode_command_needs_tsgen_for_etm_clocks(tmp_path, base):
     with pytest.raises(SystemExit) as e:
         capture.decode_command(args(tmp_path, time_base=base), "r", "o", "s")
     assert "--tsgen-hz" in str(e.value)
+
+
+def test_notes_ask_the_decoder_for_the_note_stream_and_the_switch_log(tmp_path):
+    a = args(tmp_path, "--notes", "--itm-port", "0")
+    cmd = capture.decode_command(a, "raw", "out.pf", "syms")
+    assert cmd[cmd.index("--itm-note-port") + 1] == "0"
+    assert "--itm-note-unwrap" in cmd
+    assert cmd[cmd.index("--itm-note-out") + 1] == str(tmp_path / "notes_t.bin")
+    assert cmd[cmd.index("--nx-runs-out") + 1] == str(tmp_path / "hwruns_t.tsv")
+
+
+def test_notes_use_the_hybrid_time_base_with_a_default_tsgen(tmp_path):
+    a = args(tmp_path, "--notes", time_base="cycle")
+    cmd = capture.decode_command(a, "raw", "out.pf", "syms")
+    assert "--hybrid-time" in cmd and "--cycle-time" not in cmd
+    assert cmd[cmd.index("--tsgen-hz") + 1] == "75000000.0"
+    given = args(tmp_path, "--notes", "--tsgen-hz", "100e6")
+    cmd = capture.decode_command(given, "raw", "out.pf", "syms")
+    assert cmd[cmd.index("--tsgen-hz") + 1] == "100000000.0"
 
 
 def test_grab_sets_width_then_streams(monkeypatch, tmp_path):
@@ -95,23 +120,61 @@ def test_grab_failures_abort(monkeypatch, tmp_path, which):
     assert ("set-width" if which == "width" else "cortrace-grab") in str(e.value)
 
 
-def fake_decode(ok=True):
+def fake_decode(ok=True, notes=None):
+    """run_cmd stand-in: writes the outputs the real decoder would."""
+
     def run_cmd(cmd, **_k):
         if ok and "--perf" in cmd:
             open(cmd[cmd.index("--perf") + 1], "wb").close()
-        return types.SimpleNamespace(returncode=0 if ok else 1, stderr="", stdout="")
+        if ok and notes is not None and "--itm-note-out" in cmd:
+            with open(cmd[cmd.index("--itm-note-out") + 1], "wb") as f:
+                f.write(notes)
+        out = "stream health : lost-sync=0 -> clean\nchatter nobody needs\n"
+        return types.SimpleNamespace(returncode=0 if ok else 1, stderr=out, stdout="")
 
     return run_cmd
 
 
-def test_run_hw_only_from_raw_file(monkeypatch, tmp_path):
+def test_run_cmd_logs_the_command_and_runs_it(capsys):
+    assert capture.run_cmd(["true"]).returncode == 0
+    assert "$ true" in capsys.readouterr().err
+
+
+def test_run_from_raw_file(monkeypatch, tmp_path, capsys):
     raw = tmp_path / "r.bin"
     raw.write_bytes(b"x")
     monkeypatch.setattr(capture, "run_cmd", fake_decode())
     monkeypatch.setattr(capture.subprocess, "run", lambda *a, **_k: None)
-    a = args(tmp_path / "out", fuse=False)
-    result = capture.run(a, raw_in=str(raw))
+    result = capture.run(args(tmp_path / "out"), raw_in=str(raw))
     assert result == str(tmp_path / "out" / "hw_t.perfetto")
+    err = capsys.readouterr().err
+    assert "stream health" in err and "chatter" not in err  # only the key lines
+
+
+def test_run_with_notes_reports_where_they_went(monkeypatch, tmp_path, capsys):
+    raw = tmp_path / "r.bin"
+    raw.write_bytes(b"x")
+    monkeypatch.setattr(capture, "run_cmd", fake_decode(notes=b"\x10\x04"))
+    monkeypatch.setattr(capture.subprocess, "run", lambda *a, **_k: None)
+    result = capture.run(args(tmp_path / "out", "--notes"), raw_in=str(raw))
+    assert result == str(tmp_path / "out" / "hw_t.perfetto")
+    err = capsys.readouterr().err
+    assert "notes_t.bin" in err and "hwruns_t.tsv" in err and "warning" not in err
+
+
+@pytest.mark.parametrize("notes", [None, b""])
+def test_run_with_no_note_bytes_warns_and_keeps_the_hardware_trace(
+    monkeypatch, tmp_path, capsys, notes
+):
+    raw = tmp_path / "r.bin"
+    raw.write_bytes(b"x")
+    monkeypatch.setattr(capture, "run_cmd", fake_decode(notes=notes))
+    monkeypatch.setattr(capture.subprocess, "run", lambda *a, **_k: None)
+    result = capture.run(
+        args(tmp_path / "out", "--notes", "--itm-port", "0"), raw_in=str(raw)
+    )
+    assert result.endswith("hw_t.perfetto")
+    assert "no note bytes on ITM port 0" in capsys.readouterr().err
 
 
 def test_run_reports_decode_failure_and_missing_raw(monkeypatch, tmp_path):
@@ -131,97 +194,17 @@ def test_run_captures_when_no_raw_given(monkeypatch, tmp_path):
     grabbed = []
     monkeypatch.setattr(capture, "grab", lambda a, raw: grabbed.append(raw))
     monkeypatch.setattr(capture, "decode_hw", lambda a, raw: raw + ".pf")
-    result = capture.run(args(tmp_path / "o", fuse=False))
+    result = capture.run(args(tmp_path / "o"))
     assert grabbed == [str(tmp_path / "o" / "raw_t.bin")]
     assert result.endswith("raw_t.bin.pf")
 
 
-def test_fuse_mode_forwards_the_merge_format_and_finds_the_archive(
-    monkeypatch, tmp_path
-):
-    seen = []
-
-    def fake_fuse(argv):
-        seen.append(argv)
-        (tmp_path / "o" / "fused_t.tar").write_bytes(b"")
-        return 0
-
-    monkeypatch.setattr(capture.fuse_mod, "main", fake_fuse)
-    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
-    a = args(tmp_path / "o", fuse=True, width=None)
-    assert a.merge_format == "archive"  # the default for capture
-    assert capture.run(a).endswith("fused_t.tar")
-    assert seen[0][seen[0].index("--merge-format") + 1] == "archive"
-
-
-def test_fuse_mode_hands_over_and_finds_the_fused_file(monkeypatch, tmp_path):
-    seen = []
-
-    def fake_fuse(argv):
-        seen.append(argv)
-        (tmp_path / "o" / "fused_t.perfetto").write_bytes(b"")
-        return 0
-
-    monkeypatch.setattr(capture.fuse_mod, "main", fake_fuse)
-    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
-    a = args(tmp_path / "o", fuse=True, tcbmap="m.txt", tsgen_hz=75e6, width=None)
-    assert capture.run(a, extra=["--pynuttx", "/p"]).endswith("fused_t.perfetto")
-    argv = seen[0]
-    assert argv[argv.index("--raw") + 1].endswith("raw_t.bin")
-    assert argv[argv.index("--tcbmap") + 1] == "m.txt"
-    assert argv[argv.index("--tsgen-hz") + 1] == "75000000.0"
-    assert argv[-2:] == ["--pynuttx", "/p"]
-
-
-def test_fuse_without_alignment_falls_back_to_hardware_trace(monkeypatch, tmp_path):
-    monkeypatch.setattr(capture.fuse_mod, "main", lambda argv: 0)
-    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
-    result = capture.run(args(tmp_path / "o", fuse=True, width=None))
-    assert result.endswith("hw_t.perfetto")
-
-
-def test_fuse_failure_aborts(monkeypatch, tmp_path):
-    monkeypatch.setattr(capture.fuse_mod, "main", lambda argv: 3)
-    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
-    with pytest.raises(SystemExit):
-        capture.run(args(tmp_path / "o", fuse=True, width=None))
-
-
 def test_main_prints_result_and_opens(monkeypatch, tmp_path, capsys):
     opened = []
-    monkeypatch.setattr(capture, "run", lambda a, raw_in=None, extra=(): "/x/y.pf")
+    monkeypatch.setattr(capture, "run", lambda a, raw_in=None: "/x/y.pf")
     monkeypatch.setattr(capture, "perfetto_open_main", lambda a: opened.append(a) or 0)
     base = ["--out-dir", str(tmp_path), "--elf", "e", "--raw-in", "r"]
     assert capture.main(base) == 0
     assert capsys.readouterr().out.strip() == "/x/y.pf" and not opened
     assert capture.main(base + ["--open"]) == 0
     assert opened == [["/x/y.pf", "--keep"]]
-
-
-def test_long_capture_is_refused_without_allow_long(monkeypatch, tmp_path):
-    monkeypatch.setattr(capture, "grab", lambda a, raw: None)
-    with pytest.raises(SystemExit) as e:
-        capture.run(args(tmp_path / "o", secs=30.0, fuse=False))
-    assert "--allow-long" in str(e.value)
-
-
-def test_low_disk_stops_a_capture_before_it_starts(monkeypatch, tmp_path):
-    grabbed = []
-    monkeypatch.setattr(capture, "grab", lambda a, raw: grabbed.append(raw))
-    monkeypatch.setattr(capture.runstore, "free_bytes", lambda p: 1)
-    with pytest.raises(SystemExit) as e:
-        capture.run(args(tmp_path / "o", fuse=False))
-    assert "not enough free space" in str(e.value) and not grabbed
-    assert not (tmp_path / "o").exists()  # nothing created
-
-
-def test_decode_of_an_existing_raw_is_sized_from_the_file(monkeypatch, tmp_path):
-    raw = tmp_path / "r.bin"
-    raw.write_bytes(b"x" * 1000)
-    needs = []
-    monkeypatch.setattr(
-        capture.runstore, "require_space", lambda p, need, what: needs.append(need)
-    )
-    monkeypatch.setattr(capture, "decode_hw", lambda a, r: "x.pf")
-    capture.run(args(tmp_path / "o", fuse=False), raw_in=str(raw))
-    assert needs == [1000 * capture.runstore.EXPANSION]

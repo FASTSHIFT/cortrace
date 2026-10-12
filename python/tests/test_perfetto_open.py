@@ -117,3 +117,93 @@ def test_main_no_open_prints_url(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "http://127.0.0.1:" in out
+
+
+# ---- more serve_and_open paths ---------------------------------------------
+
+
+def test_open_browser_gives_up_when_the_webbrowser_module_fails(monkeypatch):
+    monkeypatch.setattr(po.shutil, "which", lambda name: None)
+    import webbrowser
+
+    def boom(_url):
+        raise RuntimeError("no browser")
+
+    monkeypatch.setattr(webbrowser, "open", boom)
+    assert po._open_browser("http://x/") is False
+
+
+def test_serve_and_open_rejects_an_empty_trace(tmp_path, capsys):
+    trace = tmp_path / "e.perfetto"
+    trace.write_bytes(b"")
+    assert po.serve_and_open(str(trace), do_open=False) == 2
+    assert "empty" in capsys.readouterr().err
+
+
+def test_serve_and_open_reports_a_port_that_is_taken(tmp_path, capsys):
+    trace = tmp_path / "t.perfetto"
+    trace.write_bytes(b"X")
+    busy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    busy.bind(("127.0.0.1", 0))
+    busy.listen(1)
+    try:
+        port = busy.getsockname()[1]
+        assert po.serve_and_open(str(trace), port=port, do_open=False) == 2
+    finally:
+        busy.close()
+    assert "cannot bind" in capsys.readouterr().err
+
+
+def fetch_when_up(url, paths):
+    """Request `paths` from a server that is starting in another thread."""
+    import time
+    import urllib.error
+    import urllib.request
+
+    codes = {}
+    for path in paths:
+        for _ in range(50):
+            try:
+                codes[path] = urllib.request.urlopen(url + path, timeout=2).status
+                break
+            except urllib.error.HTTPError as exc:
+                codes[path] = exc.code
+                break
+            except OSError:
+                time.sleep(0.1)
+    return codes
+
+
+def test_serve_and_open_returns_once_the_page_has_the_trace(tmp_path, monkeypatch):
+    import threading
+
+    trace = tmp_path / "t.perfetto"
+    trace.write_bytes(b"X")
+    port = po._pick_free_port("127.0.0.1")
+    opened = []
+    monkeypatch.setattr(po, "_open_browser", lambda url: opened.append(url) or True)
+    codes = {}
+
+    def browser():
+        codes.update(
+            fetch_when_up(f"http://127.0.0.1:{port}", ["/nope", "/__delivered"])
+        )
+
+    thread = threading.Thread(target=browser, daemon=True)
+    thread.start()
+    assert po.serve_and_open(str(trace), port=port, timeout=10) == 0
+    thread.join(5)
+    assert opened == [f"http://127.0.0.1:{port}/"]
+    assert codes["/nope"] == 404 and codes["/__delivered"] == 204
+
+
+def test_serve_and_open_times_out_and_prints_the_url_without_a_browser(
+    tmp_path, monkeypatch, capsys
+):
+    trace = tmp_path / "t.perfetto"
+    trace.write_bytes(b"X")
+    monkeypatch.setattr(po, "_open_browser", lambda url: False)
+    assert po.serve_and_open(str(trace), timeout=0.2) == 1
+    captured = capsys.readouterr()
+    assert "http://127.0.0.1:" in captured.out
+    assert "timed out" in captured.err
