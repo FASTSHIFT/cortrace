@@ -9,6 +9,7 @@ import re
 import socket
 
 PROMPT = b"> "
+_WORD = re.compile(r"0x[0-9a-fA-F]+:\s+([0-9a-fA-F]{8})")
 _LINE = re.compile(r"\s*0x([0-9a-fA-F]+):\s+((?:[0-9a-fA-F]{2}\s*)+)")
 
 
@@ -49,6 +50,32 @@ class OpenOcdTelnet:
         """Run one OpenOCD command, return its output."""
         self._sock.sendall(text.encode() + b"\n")
         return self._read_until_prompt()
+
+    def _checked(self, text):
+        out = self.command(text)
+        if "rror" in out:
+            raise ProbeError(f"OpenOCD: `{text}` failed: {out.strip()}")
+        return out
+
+    def read32(self, addr):
+        """The 32-bit register or word at `addr`."""
+        out = self._checked(f"mdw 0x{addr:08x}")
+        match = _WORD.search(out)
+        if not match:
+            raise ProbeError(f"cannot read 0x{addr:08x}: {out.strip()}")
+        return int(match.group(1), 16)
+
+    def write32(self, addr, value):
+        """Write a 32-bit register or word."""
+        self._checked(f"mww 0x{addr:08x} 0x{value:08x}")
+
+    def halt(self):
+        """Stop the core."""
+        self._checked("halt")
+
+    def resume(self):
+        """Let the core run again."""
+        self._checked("resume")
 
     def read_bytes(self, addr, size):
         """`size` bytes at `addr`, or None if the target refused the read."""

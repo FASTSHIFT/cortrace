@@ -26,6 +26,8 @@ class FreertosPlugin(OsPlugin):
         if addr is not None:
             return [Watch(CURRENT, addr)]
         base = elf.symbol(CURRENT_SMP)
+        if base is None:
+            raise PluginError(f"this ELF defines neither {CURRENT} nor {CURRENT_SMP}")
         cores = max(1, elf.symbol_size(CURRENT_SMP) // 4)
         return [Watch(f"{CURRENT_SMP}[{i}]", base + 4 * i) for i in range(cores)]
 

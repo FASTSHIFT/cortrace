@@ -1,0 +1,86 @@
+# STM32H743 (Cortex-M7): 4-bit parallel trace on PE2 (TRACECK) and PE3..PE6.
+#
+# The CoreSight blocks are listed by base address; the arming sequence that uses
+# them is the same on every Armv7-M part (cortrace/trace_arm.py). Only the
+# [[on_trace_start]] steps are specific to this chip: they make the trace pins
+# and the trace clocks work. Register names: RM0433.
+name = "stm32h743"
+description = "STM32H743, parallel trace on PE2..PE6"
+core = "cortex-m7"
+
+[coresight]
+etm = 0xE0041000
+dwt = 0xE0001000
+itm = 0xE0000000
+cstf = 0x5C013000
+etf = 0x5C014000
+tpiu = 0x5C015000
+tsgen = 0x5C005000
+
+[trace]
+etm_trace_id = 2    # TRCTRACEIDR: the ETM stream on the TPIU
+itm_trace_id = 1    # ITM_TCR.TraceBusID: the ITM/DWT stream
+max_width = 4
+
+# Default clocks of the bring-up board; override on the command line.
+[clocks]
+tsgen_hz = 75000000
+sysclk_hz = 150000000
+
+# Rated slew of the VERY_HIGH pads needs the I/O compensation cell: without it
+# PE5/PE6 (TRACED2/3) never reach full swing and the deframer cannot lock.
+[[on_trace_start]]
+comment = "RCC_APB4ENR.SYSCFGEN"
+op = "rmw32"
+addr = 0x580244F4
+set = 0x2
+
+[[on_trace_start]]
+comment = "SYSCFG_CCCSR.EN"
+op = "rmw32"
+addr = 0x58000420
+set = 0x1
+
+[[on_trace_start]]
+comment = "wait for SYSCFG_CCCSR.READY"
+op = "poll32"
+addr = 0x58000420
+mask = 0x100
+tries = 20          # READY has not been seen set on the bring-up board; go on
+
+[[on_trace_start]]
+comment = "RCC_AHB4ENR.GPIOEEN"
+op = "rmw32"
+addr = 0x580244E0
+set = 0x10
+
+[[on_trace_start]]
+comment = "GPIOE_MODER: PE2..PE6 alternate function"
+op = "rmw32"
+addr = 0x58021000
+set = 0x2AA0
+clear = 0x3FF0
+
+[[on_trace_start]]
+comment = "GPIOE_OTYPER: PE2..PE6 push-pull"
+op = "rmw32"
+addr = 0x58021004
+clear = 0x7C
+
+[[on_trace_start]]
+comment = "GPIOE_OSPEEDR: PE2..PE6 very high speed"
+op = "rmw32"
+addr = 0x58021008
+set = 0x3FF0
+
+[[on_trace_start]]
+comment = "GPIOE_AFRL: PE2..PE6 AF0 (TRACE)"
+op = "rmw32"
+addr = 0x58021020
+clear = 0x0FFFFF00
+
+[[on_trace_start]]
+comment = "DBGMCU_CR: TRACECLKEN | D1DBGCKEN | D3DBGCKEN"
+op = "rmw32"
+addr = 0x5C001004
+set = 0x00700000

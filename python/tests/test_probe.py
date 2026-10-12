@@ -11,8 +11,11 @@ from cortrace.probe import OpenOcdTelnet, ProbeError
 class FakeOpenOcd:
     """Answers `mdb ADDR COUNT` like OpenOCD does (16 bytes per line)."""
 
-    def __init__(self, memory):
+    def __init__(self, memory, fail=None):
         self.memory = memory  # {addr: byte}
+        self.words = {}  # {addr: 32-bit value} for mdw / mww
+        self.log = []
+        self.fail = fail  # command word that answers with an error
         self.server = socket.socket()
         self.server.bind(("127.0.0.1", 0))
         self.server.listen(1)
@@ -35,9 +38,20 @@ class FakeOpenOcd:
         conn.close()
 
     def answer(self, command):
-        word, addr, count = command.split()
+        word, *rest = command.split()
+        self.log.append(command)
+        if word in ("halt", "resume"):
+            return b"" if self.fail != word else b"Error: no target\r\n"
+        if word == "mww":
+            self.words[int(rest[0], 0)] = int(rest[1], 0)
+            return b"" if self.fail != word else b"Error: write failed\r\n"
+        if word == "mdw":
+            addr = int(rest[0], 0)
+            if addr not in self.words:
+                return b"\r\n"
+            return f"0x{addr:08x}: {self.words[addr]:08x} \r\n".encode()
         assert word == "mdb"
-        addr, count = int(addr, 0), int(count)
+        addr, count = int(rest[0], 0), int(rest[1])
         lines = []
         for base in range(addr, addr + count, 16):
             row = [
@@ -64,6 +78,43 @@ def test_a_refused_read_gives_none():
     probe = OpenOcdTelnet(f"127.0.0.1:{server.port}")
     assert probe.read_bytes(0x2000_0000, 4) is None
     assert probe.read_bytes(0x3000_0000, 4) is None
+    probe.close()
+
+
+def test_registers_are_written_and_read_back():
+    server = FakeOpenOcd({})
+    probe = OpenOcdTelnet(f"127.0.0.1:{server.port}")
+    probe.halt()
+    probe.write32(0xE0001020, 0x20000410)
+    assert probe.read32(0xE0001020) == 0x20000410
+    probe.resume()
+    assert server.log == [
+        "halt",
+        "mww 0xe0001020 0x20000410",
+        "mdw 0xe0001020",
+        "resume",
+    ]
+    probe.close()
+
+
+def test_unreadable_register_is_a_probe_error():
+    server = FakeOpenOcd({})
+    probe = OpenOcdTelnet(f"127.0.0.1:{server.port}")
+    with pytest.raises(ProbeError, match="cannot read 0xe0001020"):
+        probe.read32(0xE0001020)
+    probe.close()
+
+
+@pytest.mark.parametrize("which", ["halt", "resume", "mww"])
+def test_openocd_errors_are_probe_errors(which):
+    server = FakeOpenOcd({}, fail=which)
+    probe = OpenOcdTelnet(f"127.0.0.1:{server.port}")
+    with pytest.raises(ProbeError, match="failed"):
+        {
+            "halt": probe.halt,
+            "resume": probe.resume,
+            "mww": lambda: probe.write32(4, 5),
+        }[which]()
     probe.close()
 
 

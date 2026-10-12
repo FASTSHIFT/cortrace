@@ -24,6 +24,9 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/python/cortrace
         DESTINATION lib/python3/dist-packages
         FILES_MATCHING PATTERN "*.py"
         PATTERN "__pycache__" EXCLUDE)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/platforms/
+        DESTINATION share/cortrace/platforms
+        FILES_MATCHING PATTERN "*.toml")
 install(FILES ${CMAKE_BINARY_DIR}/_version.py
         DESTINATION lib/python3/dist-packages/cortrace)
 install(FILES ${CMAKE_SOURCE_DIR}/README.md ${CMAKE_SOURCE_DIR}/README_en.md
@@ -50,7 +53,8 @@ set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SECTION devel)
 set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/FASTSHIFT/cortrace")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3 (>= 3.10), python3-pyelftools")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS
+    "python3 (>= 3.10), python3-pyelftools, python3-tomli | python3 (>= 3.11)")
 # arm-none-eabi-nm reads the ELF symbols; openocd arms/reads the target.
 set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "binutils-arm-none-eabi")
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "openocd")
