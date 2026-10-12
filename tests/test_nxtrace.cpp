@@ -126,6 +126,35 @@ TEST(nxtrace_build_thread_runs_intervals)
     CHECK(runs[0].id.tid != runs[1].id.tid);
 }
 
+TEST(nxtrace_build_thread_runs_folds_repeated_value)
+{
+    // An RTOS may rewrite the current-task pointer with the value it already
+    // holds (FreeRTOS does on every scheduler pass). That is not a switch.
+    std::vector<DwtEvent> ev;
+    auto mk = [](std::size_t src, uint32_t v) {
+        DwtEvent e;
+        e.src_index = src;
+        e.comparator = 0;
+        e.size = 4;
+        e.value = v;
+        return e;
+    };
+    ev.push_back(mk(10, 0x20000100));
+    ev.push_back(mk(15, 0x20000100)); // same task again
+    ev.push_back(mk(20, 0x20000200));
+    ev.push_back(mk(25, 0x20000200)); // same task again
+    ev.push_back(mk(30, 0x20000100));
+
+    auto runs = build_thread_runs(ev, nullptr, 0, /*stream_end_src=*/40);
+    CHECK_EQ((long)runs.size(), 3L);
+    CHECK_EQ((long)runs[0].begin_src, 10L);
+    CHECK_EQ((long)runs[0].end_src, 20L);
+    CHECK_EQ((long)runs[1].begin_src, 20L);
+    CHECK_EQ((long)runs[1].end_src, 30L);
+    CHECK_EQ((long)runs[2].begin_src, 30L);
+    CHECK_EQ((long)runs[2].end_src, 40L);
+}
+
 TEST(nxtrace_nuttx_resolver_names_thread)
 {
     // Fake ELF image: a static TCB at 0x24000400 with pid=5 at +0x30 and

@@ -112,7 +112,8 @@ using ThreadResolver = std::function<ThreadId(uint32_t value)>;
 // Turn a sequence of DWT switch events (each carrying the new current-task
 // pointer) into thread-run intervals. `resolve` maps a captured pointer to a
 // ThreadId; if empty, a default pointer-formatting resolver is used. Only events
-// on comparator `watch_comp` are treated as switches (default 0). The last run
+// on comparator `watch_comp` are treated as switches (default 0), and a write
+// of the value the pointer already holds is not one. The last run
 // is left open (end_src == begin_src) unless `stream_end_src` is given.
 std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
     const ThreadResolver& resolve = {}, uint8_t watch_comp = 0, std::size_t stream_end_src = 0);

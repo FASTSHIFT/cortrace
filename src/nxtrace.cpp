@@ -230,6 +230,9 @@ std::vector<ThreadRun> build_thread_runs(const std::vector<DwtEvent>& events,
     for (const auto& e : events) {
         if (e.comparator != watch_comp)
             continue;
+        // Writing the value the pointer already holds is not a switch.
+        if (!runs.empty() && runs.back().tcb == e.value)
+            continue;
         if (!runs.empty())
             runs.back().end_src = e.src_index; // close the previous run here
         ThreadRun r;
