@@ -657,3 +657,48 @@ TEST(nxtrace_thread_slices_skip_runs_that_never_closed)
     CHECK_EQ(s[0].name, std::string("closed"));
     CHECK_EQ(names[7], std::string("Threads"));
 }
+
+TEST(nxtrace_reattribute_believes_the_thread_a_slice_was_tagged_with)
+{
+    // A function of thread 1 that is switched out and ends in thread 1's next
+    // run: both of its boundaries belong on thread 1's lane. Placing them by
+    // byte index would put the begin in run 1 and the end in run 3 -- fine --
+    // but a slice emitted while thread 2 is the run at that index (the end of a
+    // parked thread at end-of-trace) would land on thread 2's lane.
+    std::vector<DwtEvent> ev;
+    auto mk = [](std::size_t src, uint32_t v) {
+        DwtEvent e;
+        e.src_index = src;
+        e.comparator = 0;
+        e.size = 4;
+        e.value = v;
+        return e;
+    };
+    ev.push_back(mk(10, 0x20000100)); // thread A
+    ev.push_back(mk(20, 0x20000200)); // thread B
+    auto runs = build_thread_runs(ev, nullptr, 0, 30);
+
+    auto sl = [](uint64_t bidx, bool begin, int thread) {
+        SliceEvent s;
+        s.byte_index = bidx;
+        s.begin = begin;
+        s.track = 0;
+        s.name = "fn";
+        s.thread = thread;
+        return s;
+    };
+    const int tid_a = runs[0].id.tid;
+    const int tid_b = runs[1].id.tid;
+    std::vector<SliceEvent> in;
+    in.push_back(sl(12, true, tid_a)); // inside A's run
+    in.push_back(sl(25, false, tid_a)); // emitted in B's run, but A's slice
+    in.push_back(sl(25, true, tid_b));
+    in.push_back(sl(15, true, kThreadBoot)); // boot frame closed late
+    std::map<int, std::string> tracks;
+    auto out = reattribute_slices_to_threads(in, runs, 2000, tracks);
+    CHECK(out[0].track >= 2000);
+    CHECK_EQ(out[0].track, out[1].track); // same lane as its begin
+    CHECK(out[2].track != out[1].track); // thread B has its own lane
+    CHECK_EQ(out[3].track, 0); // boot context stays on the boot lane
+    CHECK((long)out[3].byte_index <= 10L); // clamped to the first switch
+}

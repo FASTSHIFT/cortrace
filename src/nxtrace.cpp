@@ -401,7 +401,18 @@ std::vector<SliceEvent> reattribute_slices_to_threads(const std::vector<SliceEve
         // keep their own lanes.
         if (s.track != 0)
             continue;
-        const int trk = track_for_byte(s.byte_index, 0);
+        // The call-stack machine knows which thread each slice came from when
+        // it was told about the switches: believe that over the byte index,
+        // which only says where the slice was emitted (a function that spans
+        // other threads' runs ends in its own thread's later run).
+        if (s.thread >= 0) {
+            auto tit = tid_to_track.find(s.thread);
+            if (tit != tid_to_track.end()) {
+                s.track = tit->second;
+                continue;
+            }
+        }
+        const int trk = s.thread == kThreadBoot ? 0 : track_for_byte(s.byte_index, 0);
         // A slice that STAYS on track 0 but sits at/after the first switch is a
         // boot-context frame the call-stack machine only closed at end-of-trace
         // (its END byte_index is far in the future), which Perfetto would render

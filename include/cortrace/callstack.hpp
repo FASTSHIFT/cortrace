@@ -18,6 +18,14 @@
 
 namespace cortrace {
 
+// Which thread a slice belongs to (SliceEvent::thread).
+//   >= 0            the RTOS thread whose call stack the slice came from
+//   kThreadUntagged not attributed by the machine (ISR slices; callers that do
+//                   not announce thread switches): attribute by byte index
+//   kThreadBoot     before any thread switch was announced (boot context)
+constexpr int kThreadUntagged = -1;
+constexpr int kThreadBoot = -2;
+
 // One emitted slice boundary (begin or end of a function on the timeline).
 struct SliceEvent {
     uint64_t tick; // monotonic order (real ns applied by the sink via byte_index)
@@ -27,6 +35,7 @@ struct SliceEvent {
     int track = 0; // track id: 0 = main thread, >=1 = a per-exception ISR track
     uint64_t etm_ts = 0; // most-recent ETM global timestamp seen before this event
     uint64_t cycle_clock = 0; // accumulated CPU cycles (cycle counting) at this event
+    int thread = kThreadUntagged; // owning thread, see kThreadUntagged / kThreadBoot
 };
 
 // An ETM global-timestamp anchor: the TSGEN value that was in force at a given
@@ -57,6 +66,18 @@ public:
     // Feed one element. Safe to call in any order; ignores kinds it does not
     // model.
     void process(const Element& e);
+
+    // The CPU now runs thread `tid` (a write of the RTOS current-task pointer).
+    // Every thread has its own call stack: the stack of the thread being left
+    // is parked and the one of `tid` (empty the first time) takes its place.
+    // Without this a single stack is shared by all threads, and whatever a
+    // task left open when it was switched out (a call into the scheduler) is
+    // popped, or left standing, by the next task's returns.
+    //
+    // ISR contexts have stacks of their own, so a switch announced while an
+    // exception runs (the scheduler runs in PendSV) takes effect at once and
+    // the exception return resumes the new thread's stack.
+    void switch_thread(int tid);
 
     // Call once at end-of-trace: closes any still-open frames so the emitted
     // slice stream is balanced.
@@ -96,10 +117,13 @@ private:
     void relabel_top(const std::string& fn);
     Context& cur() { return ctx_.back(); } // active (innermost) context
     void emit(bool begin, const std::string& name); // to the active track
+    void emit_to(bool begin, const std::string& name, int track, int thread, std::size_t depth);
     int track_for_exception(uint32_t number); // stable track id per exc number
 
     const SymbolTable& syms_;
-    std::vector<Context> ctx_; // context stack (0 = main thread)
+    std::vector<Context> ctx_; // context stack (0 = the running thread)
+    int cur_thread_ = kThreadBoot; // thread whose stack is ctx_[0].stack
+    std::map<int, std::vector<Frame>> parked_; // stacks of the threads not running
     std::vector<SliceEvent> slices_;
     std::map<std::string, long> begins_by_fn_;
     std::map<std::string, long> ends_by_fn_;

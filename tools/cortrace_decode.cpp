@@ -553,10 +553,6 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "error: failed to add ELF %s\n", elf_path.c_str());
         return 1;
     }
-    decoder->set_sink([&](const Element& e) {
-        cov.observe(e);
-        machine.process(e);
-    });
 
     FILE* f = std::fopen(etm_path.c_str(), "rb");
     if (!f) {
@@ -572,7 +568,69 @@ int main(int argc, char** argv)
     std::vector<uint8_t> dwt_bytes;
     std::vector<std::size_t> dwt_src;
     std::vector<std::size_t> etm_src; // etm byte i came from assembled src etm_src[i]
+    // Thread overlay. The runs are built BEFORE the ETM stream is decoded and
+    // handed to the call-stack machine as a schedule, so every thread gets its
+    // own call stack; the Threads track and the per-thread lanes are made from
+    // the same runs afterwards.
+    std::vector<SliceEvent> nx_slices;
+    std::map<int, std::string> nx_tracks;
+    std::vector<ThreadRun> nx_runs;
+    std::size_t nx_event_count = 0;
+    std::vector<std::pair<std::size_t, int>> thread_schedule; // (ETM byte index, tid)
+    std::size_t next_switch = 0;
+    auto build_threads = [&]() {
+        if (!nx_enabled)
+            return;
+        auto dwt_events = parse_dwt_data_values(dwt_bytes, dwt_src);
+        // Map assembled src_index -> ETM byte index by binary search in etm_src
+        // (monotonic). Rewrite each event's src_index into ETM-byte space so
+        // thread_runs_to_slices' byte_index lines up with the ETM TimeBase.
+        auto to_etm_index = [&](std::size_t asm_src) -> std::size_t {
+            if (etm_src.empty())
+                return asm_src;
+            auto it = std::lower_bound(etm_src.begin(), etm_src.end(), asm_src);
+            return static_cast<std::size_t>(it - etm_src.begin());
+        };
+        for (auto& e : dwt_events)
+            e.src_index = to_etm_index(e.src_index);
+        ThreadResolver resolver;
+        ElfImage img;
+        const int nx_track_id = 1000; // high id so it never collides with ISR tracks
+        if (auto map_opt = program.present("--thread-map")) {
+            auto m = load_tcb_map(*map_opt);
+            std::fprintf(stderr, "threads: loaded %zu thread map entries from %s\n", m.size(),
+                map_opt->c_str());
+            resolver = make_map_resolver(std::move(m));
+        } else if (!elf_path.empty() && img.load(elf_path)) {
+            auto reader = [img](uint32_t addr, uint32_t& out) { return img.read_u32(addr, out); };
+            auto nx = std::make_shared<NuttxResolver>(reader, syms);
+            nx->set_offsets(nx_pid_off, nx_entry_off);
+            if (auto tcbmap_opt = program.present("--nx-tcbmap")) {
+                auto m = load_tcb_map(*tcbmap_opt);
+                std::fprintf(stderr, "nxtrace: loaded %zu TCB map entries from %s\n", m.size(),
+                    tcbmap_opt->c_str());
+                nx->set_tcb_map(std::move(m));
+            }
+            resolver = [nx](uint32_t v) { return (*nx)(v); };
+        }
+        const std::size_t stream_end = etm_src.empty() ? 0 : etm_src.size();
+        nx_event_count = dwt_events.size();
+        nx_runs = build_thread_runs(dwt_events, resolver, nx_comp, stream_end);
+        nx_slices = thread_runs_to_slices(nx_runs, nx_track_id, nx_tracks);
+        for (const auto& r : nx_runs)
+            thread_schedule.emplace_back(r.begin_src, r.id.tid);
+    };
 
+    decoder->set_sink([&](const Element& e) {
+        cov.observe(e);
+        // Threads switched in at or before this element's ETM byte run it.
+        while (next_switch < thread_schedule.size()
+            && thread_schedule[next_switch].first <= e.byte_index) {
+            machine.switch_thread(thread_schedule[next_switch].second);
+            ++next_switch;
+        }
+        machine.process(e);
+    });
     // --raw: read the whole capture, deframe it in-process (nibble reassemble +
     // TPIU demux), then feed the resulting ETM bytes to the decoder. This
     // replaces the slow host Python deframe_to_etm.py path.
@@ -688,11 +746,13 @@ int main(int argc, char** argv)
         }
 
         total = etm_bytes.size();
+        build_threads();
         if (!decoder->process(etm_bytes.data(), etm_bytes.size())) {
             std::fprintf(stderr, "error: opencsd fatal while decoding deframed stream\n");
             fatal = true;
         }
     } else {
+        build_threads(); // no DWT stream without --raw: nothing to schedule
         std::vector<uint8_t> buf(1 << 16);
         std::size_t n;
         while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0) {
@@ -810,51 +870,12 @@ int main(int argc, char** argv)
     // on a dedicated 'Threads' track. Each DWT event's assembled-byte src_index
     // is mapped to the ETM byte index (via etm_src) so the Threads track shares
     // the ETM timeline (--time / byte-index base).
-    std::vector<SliceEvent> nx_slices;
-    std::map<int, std::string> nx_tracks;
-    std::vector<ThreadRun> nx_runs;
+    // (The runs were built before the decode, because the call-stack machine
+    // needs the switches while it runs: see build_threads.)
     if (nx_enabled) {
-        auto dwt_events = parse_dwt_data_values(dwt_bytes, dwt_src);
-
-        // Map assembled src_index -> ETM byte index by binary search in etm_src
-        // (monotonic). Rewrite each event's src_index into ETM-byte space so
-        // thread_runs_to_slices' byte_index lines up with the ETM TimeBase.
-        auto to_etm_index = [&](std::size_t asm_src) -> std::size_t {
-            if (etm_src.empty())
-                return asm_src;
-            auto it = std::lower_bound(etm_src.begin(), etm_src.end(), asm_src);
-            return static_cast<std::size_t>(it - etm_src.begin());
-        };
-        for (auto& e : dwt_events)
-            e.src_index = to_etm_index(e.src_index);
-
-        ThreadResolver resolver;
-        ElfImage img;
-        const int nx_track_id = 1000; // high id so it never collides with ISR tracks
-        if (auto map_opt = program.present("--thread-map")) {
-            auto m = load_tcb_map(*map_opt);
-            std::fprintf(stderr, "threads: loaded %zu thread map entries from %s\n", m.size(),
-                map_opt->c_str());
-            resolver = make_map_resolver(std::move(m));
-        } else if (!elf_path.empty() && img.load(elf_path)) {
-            auto reader = [img](uint32_t addr, uint32_t& out) { return img.read_u32(addr, out); };
-            auto nx = std::make_shared<NuttxResolver>(reader, syms);
-            nx->set_offsets(nx_pid_off, nx_entry_off);
-            if (auto tcbmap_opt = program.present("--nx-tcbmap")) {
-                auto m = load_tcb_map(*tcbmap_opt);
-                std::fprintf(stderr, "nxtrace: loaded %zu TCB map entries from %s\n", m.size(),
-                    tcbmap_opt->c_str());
-                nx->set_tcb_map(std::move(m));
-            }
-            resolver = [nx](uint32_t v) { return (*nx)(v); };
-        }
-
-        std::size_t stream_end = etm_src.empty() ? total : etm_src.size();
-        nx_runs = build_thread_runs(dwt_events, resolver, nx_comp, stream_end);
-        nx_slices = thread_runs_to_slices(nx_runs, nx_track_id, nx_tracks);
         std::fprintf(stderr,
             "\n=== nxtrace ===\n  DWT stream %d: %zu bytes -> %zu switch events, %zu runs\n",
-            nx_switch_stream, dwt_bytes.size(), dwt_events.size(), nx_runs.size());
+            nx_switch_stream, dwt_bytes.size(), nx_event_count, nx_runs.size());
     }
 
     // ---- outputs -----------------------------------------------------------

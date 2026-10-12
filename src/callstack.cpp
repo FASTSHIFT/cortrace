@@ -55,8 +55,17 @@ CallStackMachine::CallStackMachine(const SymbolTable& syms)
 
 void CallStackMachine::emit(bool begin, const std::string& name)
 {
+    // Only the base context is a thread; ISR contexts keep their own track and
+    // are not attributed to a thread.
+    const int thread = ctx_.size() == 1 ? cur_thread_ : kThreadUntagged;
+    emit_to(begin, name, cur().track, thread, cur().stack.size());
+}
+
+void CallStackMachine::emit_to(
+    bool begin, const std::string& name, int track, int thread, std::size_t depth)
+{
     slices_.push_back(
-        { tick_++, last_byte_index_, begin, name, cur().track, last_etm_ts_, cycle_clock_ });
+        { tick_++, last_byte_index_, begin, name, track, last_etm_ts_, cycle_clock_, thread });
     if (begin) {
         begins_by_fn_[name]++;
         metrics_.begins++;
@@ -65,9 +74,27 @@ void CallStackMachine::emit(bool begin, const std::string& name)
         metrics_.ends++;
     }
     // max_depth tracks the deepest single-track call stack.
-    int d = static_cast<int>(cur().stack.size());
-    if (d > metrics_.max_depth)
-        metrics_.max_depth = d;
+    if (static_cast<int>(depth) > metrics_.max_depth)
+        metrics_.max_depth = static_cast<int>(depth);
+}
+
+void CallStackMachine::switch_thread(int tid)
+{
+    if (tid == cur_thread_)
+        return;
+    auto& base = ctx_.front().stack;
+    parked_[cur_thread_] = std::move(base);
+    auto it = parked_.find(tid);
+    if (it != parked_.end()) {
+        base = std::move(it->second);
+        parked_.erase(it);
+    } else {
+        base = { { "<root>", 0 } };
+    }
+    cur_thread_ = tid;
+    // A call announced by the last range of the thread that was left is not
+    // the new thread's.
+    pending_call_ = false;
 }
 
 int CallStackMachine::track_for_exception(uint32_t number)
@@ -278,6 +305,16 @@ void CallStackMachine::finish()
             break;
         ctx_.pop_back();
     }
+    // The threads that were switched out still have frames open: end them on
+    // their own account, innermost first.
+    for (auto& kv : parked_) {
+        auto& stack = kv.second;
+        while (stack.size() > 1) {
+            emit_to(false, stack.back().fn, ctx_.front().track, kv.first, stack.size());
+            stack.pop_back();
+        }
+    }
+    parked_.clear();
 }
 
 } // namespace cortrace

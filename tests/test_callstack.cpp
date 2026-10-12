@@ -352,3 +352,98 @@ TEST(callstack_unknown_elements_change_nothing)
     m.finish();
     CHECK(m.metrics().balanced());
 }
+
+// ---- threads: one call stack each ------------------------------------------
+// Thread 1 calls leaf and is switched out inside it. Thread 2 runs `other` and
+// returns. With one shared stack that return would pop thread 1's leaf frame.
+static void enter_leaf(CallStackMachine& m)
+{
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    m.process(Element::instr_range(0x1004, 0x1008, BranchKind::DirectCall, true));
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false));
+}
+
+TEST(callstack_threads_have_their_own_stacks)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.switch_thread(1);
+    enter_leaf(m);
+    m.switch_thread(2);
+    // thread 2 returns: it has no frames, thread 1's leaf must stay open
+    m.process(Element::instr_range(0x3000, 0x3010, BranchKind::Return, true));
+    CHECK_EQ(m.metrics().mismatched_returns, 1L);
+    CHECK_EQ(m.metrics().ends, 0L);
+    m.switch_thread(1);
+    m.process(Element::instr_range(0x2010, 0x2014, BranchKind::Return, true));
+    CHECK_EQ(m.metrics().ends, 1L);
+    CHECK_EQ(m.slices().back().name, std::string("leaf"));
+    CHECK_EQ(m.slices().back().thread, 1);
+    m.finish();
+    CHECK(m.metrics().balanced());
+}
+
+TEST(callstack_finish_closes_the_frames_of_threads_that_were_switched_out)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.switch_thread(1);
+    enter_leaf(m);
+    m.switch_thread(2);
+    m.process(Element::instr_range(0x3000, 0x3010, BranchKind::None, false));
+    m.finish();
+    CHECK(m.metrics().balanced());
+    // the end of leaf is attributed to thread 1, not to the thread running last
+    CHECK_EQ(m.slices().back().name, std::string("leaf"));
+    CHECK_EQ(m.slices().back().thread, 1);
+    CHECK_EQ(m.slices().back().track, 0);
+}
+
+TEST(callstack_a_switch_inside_an_exception_takes_effect_at_the_exception_return)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.switch_thread(1);
+    enter_leaf(m);
+    m.process(Element::exception(14)); // PendSV: the scheduler runs here
+    m.switch_thread(2);
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::None, false));
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    // thread 2 runs now and its stack is empty: a return is a mismatch, and
+    // thread 1's leaf is untouched
+    m.process(Element::instr_range(0x3008, 0x300c, BranchKind::Return, true));
+    CHECK_EQ(m.metrics().mismatched_returns, 1L);
+    m.finish();
+    CHECK(m.metrics().balanced());
+    int thread_of_isr = 0;
+    for (auto& s : m.slices())
+        if (s.name == "IRQ:PendSV") {
+            thread_of_isr = s.thread;
+            CHECK(s.track > 0);
+        }
+    CHECK_EQ(thread_of_isr, kThreadUntagged); // ISR slices are not thread slices
+}
+
+TEST(callstack_slices_before_the_first_switch_are_boot_slices)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    enter_leaf(m);
+    m.switch_thread(7);
+    m.finish();
+    CHECK(m.metrics().balanced());
+    for (auto& s : m.slices())
+        CHECK_EQ(s.thread, kThreadBoot);
+}
+
+TEST(callstack_switching_to_the_running_thread_changes_nothing)
+{
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.switch_thread(1);
+    enter_leaf(m);
+    m.switch_thread(1);
+    m.process(Element::instr_range(0x2010, 0x2014, BranchKind::Return, true));
+    CHECK_EQ(m.metrics().ends, 1L);
+    CHECK_EQ(m.metrics().mismatched_returns, 0L);
+}
