@@ -158,6 +158,11 @@ private:
     std::map<uint32_t, ThreadId> tcb_map_;
 };
 
+// Resolver backed only by a prepared pointer -> thread map (what an OS plugin
+// produces). A pointer the map does not list is shown as "tcb@0x..." with a
+// tid folded from the pointer, so the same pointer always lands on one track.
+ThreadResolver make_map_resolver(std::map<uint32_t, ThreadId> map);
+
 // Load a tcb->name map file (lines: "0xTCB<TAB>pid<TAB>name", '#' comments) as
 // produced by nx_tcbmap.py. Returns tcb -> ThreadId{tid=pid, name}.
 std::map<uint32_t, ThreadId> load_tcb_map(const std::string& path);

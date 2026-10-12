@@ -155,6 +155,23 @@ TEST(nxtrace_build_thread_runs_folds_repeated_value)
     CHECK_EQ((long)runs[2].end_src, 40L);
 }
 
+TEST(nxtrace_map_resolver_uses_map_then_falls_back_to_pointer)
+{
+    std::map<uint32_t, ThreadId> m;
+    ThreadId t;
+    t.tid = 7;
+    t.name = "worker";
+    m[0x20000100] = t;
+    auto r = make_map_resolver(m);
+
+    CHECK_EQ(r(0x20000100).tid, 7);
+    CHECK(r(0x20000100).name == "worker");
+    // not in the map: raw pointer, stable tid
+    CHECK(r(0x20000200).name == "tcb@0x20000200");
+    CHECK_EQ(r(0x20000200).tid, r(0x20000200).tid);
+    CHECK(r(0x20000200).tid != 7);
+}
+
 TEST(nxtrace_nuttx_resolver_names_thread)
 {
     // Fake ELF image: a static TCB at 0x24000400 with pid=5 at +0x30 and

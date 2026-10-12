@@ -284,6 +284,14 @@ ThreadId NuttxResolver::operator()(uint32_t tcb) const
     return t;
 }
 
+ThreadResolver make_map_resolver(std::map<uint32_t, ThreadId> map)
+{
+    return [m = std::move(map)](uint32_t value) {
+        auto it = m.find(value);
+        return it != m.end() ? it->second : default_resolve(value);
+    };
+}
+
 std::map<uint32_t, ThreadId> load_tcb_map(const std::string& path)
 {
     std::map<uint32_t, ThreadId> m;

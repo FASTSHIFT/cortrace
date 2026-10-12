@@ -360,43 +360,56 @@ int main(int argc, char** argv)
             .default_value(static_cast<long long>(etm_defaults.*(o.field)))
             .help(std::string(o.what) + " of the target's ETMv4 (default " + def + ")");
     }
-    // nxtrace: RTOS thread-switch overlay from the DWT data-value stream.
-    program.add_argument("--nx-switch-stream")
+    // RTOS thread-switch overlay from the DWT data-value stream. The decoder
+    // knows nothing about the OS: it sees writes of a "current task" pointer and
+    // names the pointers through a thread map prepared by an OS plugin.
+    program.add_argument("--switch-stream", "--nx-switch-stream")
         .metavar("ID")
         .scan<'i', int>()
         .default_value(-1)
-        .help("enable nxtrace: TPIU stream carrying DWT current-task writes (e.g. 1). "
-              "Adds a 'Threads' track to the Perfetto output alongside ETM.");
-    program.add_argument("--nx-comp")
+        .help("enable the thread overlay: TPIU stream carrying DWT current-task writes "
+              "(e.g. 1). Adds a 'Threads' track to the Perfetto output alongside ETM. "
+              "--nx-switch-stream is the old name.");
+    program.add_argument("--watch-comp", "--nx-comp")
         .metavar("N")
         .scan<'i', int>()
         .default_value(0)
         .help("DWT comparator id that watches the current-task pointer (default 0)");
+    program.add_argument("--thread-map")
+        .metavar("FILE")
+        .help("pointer -> thread map (lines '0xPTR<TAB>tid<TAB>name'); pointers it does "
+              "not list are shown as raw values. Replaces the built-in NuttX lookup.");
+    program.add_argument("--dump-switch-values")
+        .metavar("FILE")
+        .help("write the distinct values seen on the watched comparator, one 0xPTR per "
+              "line, and exit without decoding (needs --raw and --switch-stream). Feed "
+              "the file to an OS plugin to build --thread-map.");
     program.add_argument("--nx-tcb-pid-off")
         .metavar("OFF")
         .scan<'i', int>()
         .default_value(0x30)
-        .help("byte offset of pid in struct tcb_s (default 0x30, DWARF-derived)");
+        .help("deprecated, use --thread-map: byte offset of pid in struct tcb_s");
     program.add_argument("--nx-tcb-entry-off")
         .metavar("OFF")
         .scan<'i', int>()
         .default_value(0x3C)
-        .help("byte offset of entry in struct tcb_s (default 0x3C, DWARF-derived)");
+        .help("deprecated, use --thread-map: byte offset of entry in struct tcb_s");
     program.add_argument("--nx-tcbmap")
         .metavar("FILE")
-        .help("tcb->name map from the live target (nx_tcbmap.py) for heap TCBs "
-              "not in the ELF image (doc §4.3)");
-    program.add_argument("--nx-runs-out")
+        .help("deprecated, use --thread-map: tcb->name map for heap TCBs not in the "
+              "ELF image");
+    program.add_argument("--runs-out", "--nx-runs-out")
         .metavar("runs.tsv")
         .help("write the thread runs on the final time base as TSV "
-              "(begin_tick, tid, name); small, for checking thread switches against "
-              "another trace without parsing the whole Perfetto file");
+              "(begin_tick, name); small, for checking thread switches against "
+              "another trace without parsing the whole Perfetto file. "
+              "--nx-runs-out is the old name.");
     program.add_argument("--itm-note-port")
         .metavar("N")
         .scan<'i', int>()
         .default_value(1)
         .help("ITM stimulus port carrying software trace bytes (NuttX notes) in the "
-              "--nx-switch-stream stream (default 1; matches CONFIG_ARMV7M_NOTE_ITM_PORT)");
+              "--switch-stream stream (default 1; matches CONFIG_ARMV7M_NOTE_ITM_PORT)");
     program.add_argument("--itm-note-unwrap")
         .flag()
         .help("extend the 32-bit DWT_CYCCNT note timestamps to 64 bits across counter wraps "
@@ -404,7 +417,7 @@ int main(int argc, char** argv)
     program.add_argument("--itm-note-out")
         .metavar("notes.bin")
         .help("write the ITM stimulus-port byte stream (the NuttX note stream) here; "
-              "requires --raw and --nx-switch-stream. Feed it to `nxtrace ... file`.");
+              "requires --raw and --switch-stream. Feed it to `nxtrace ... file`.");
     program.add_argument("--log-level")
         .metavar("LVL")
         .default_value(std::string("warn"))
@@ -478,9 +491,9 @@ int main(int argc, char** argv)
     }
     const bool raw_input = program.get<bool>("--raw") || phase_locked;
     const int want_stream = program.get<int>("--want-stream");
-    const int nx_switch_stream = program.get<int>("--nx-switch-stream");
+    const int nx_switch_stream = program.get<int>("--switch-stream");
     const bool nx_enabled = nx_switch_stream >= 0;
-    const uint8_t nx_comp = static_cast<uint8_t>(program.get<int>("--nx-comp"));
+    const uint8_t nx_comp = static_cast<uint8_t>(program.get<int>("--watch-comp"));
     const uint32_t nx_pid_off = static_cast<uint32_t>(program.get<int>("--nx-tcb-pid-off"));
     const uint32_t nx_entry_off = static_cast<uint32_t>(program.get<int>("--nx-tcb-entry-off"));
 
@@ -613,9 +626,30 @@ int main(int argc, char** argv)
                 got, etm_bytes.size(), used_phase.parity, used_phase.order, async_count, frames);
         }
 
+        if (auto dump_out = program.present("--dump-switch-values")) {
+            if (!nx_enabled) {
+                std::fprintf(stderr, "error: --dump-switch-values needs --switch-stream\n");
+                return 2;
+            }
+            std::set<uint32_t> values;
+            for (const auto& e : parse_dwt_data_values(dwt_bytes, dwt_src))
+                if (e.comparator == nx_comp)
+                    values.insert(e.value);
+            FILE* vf = std::fopen(dump_out->c_str(), "w");
+            if (!vf) {
+                std::fprintf(stderr, "error: cannot write %s\n", dump_out->c_str());
+                return 1;
+            }
+            for (uint32_t v : values)
+                std::fprintf(vf, "0x%08x\n", v);
+            std::fclose(vf);
+            std::fprintf(stderr, "wrote %zu distinct switch values -> %s\n", values.size(),
+                dump_out->c_str());
+            return 0;
+        }
         if (auto note_out = program.present("--itm-note-out")) {
             if (!nx_enabled) {
-                std::fprintf(stderr, "error: --itm-note-out needs --nx-switch-stream\n");
+                std::fprintf(stderr, "error: --itm-note-out needs --switch-stream\n");
                 return 2;
             }
             const uint8_t note_port = static_cast<uint8_t>(program.get<int>("--itm-note-port"));
@@ -797,7 +831,12 @@ int main(int argc, char** argv)
         ThreadResolver resolver;
         ElfImage img;
         const int nx_track_id = 1000; // high id so it never collides with ISR tracks
-        if (!elf_path.empty() && img.load(elf_path)) {
+        if (auto map_opt = program.present("--thread-map")) {
+            auto m = load_tcb_map(*map_opt);
+            std::fprintf(stderr, "threads: loaded %zu thread map entries from %s\n", m.size(),
+                map_opt->c_str());
+            resolver = make_map_resolver(std::move(m));
+        } else if (!elf_path.empty() && img.load(elf_path)) {
             auto reader = [img](uint32_t addr, uint32_t& out) { return img.read_u32(addr, out); };
             auto nx = std::make_shared<NuttxResolver>(reader, syms);
             nx->set_offsets(nx_pid_off, nx_entry_off);
@@ -874,7 +913,7 @@ int main(int argc, char** argv)
             std::vector<SliceEvent> nx_timed = nx_slices;
             for (auto& s : nx_timed)
                 s.tick = tick_for_byte(s.byte_index);
-            if (auto runs_out = program.present("--nx-runs-out")) {
+            if (auto runs_out = program.present("--runs-out")) {
                 if (FILE* rf = std::fopen(runs_out->c_str(), "w")) {
                     for (const auto& s : nx_timed)
                         if (s.begin)
