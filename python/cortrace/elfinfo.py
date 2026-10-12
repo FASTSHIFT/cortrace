@@ -12,8 +12,27 @@ class ElfError(Exception):
     """The ELF cannot answer what was asked (no symbol, no debug info...)."""
 
 
-def _int(value):
-    return value if isinstance(value, int) else int.from_bytes(value, "little")
+DW_OP_PLUS_UCONST = 0x23
+
+
+def member_offset(value):
+    """Byte offset from DW_AT_data_member_location.
+
+    DWARF 4 and later give a plain constant. DWARF 2 and 3 (older compilers, or
+    -gdwarf-2) give a location expression, `DW_OP_plus_uconst <ULEB128>`.
+    """
+    if isinstance(value, int):
+        return value
+    ops = list(value)
+    if not ops or ops[0] != DW_OP_PLUS_UCONST:
+        raise ElfError(f"unsupported member location expression {ops}")
+    offset = shift = 0
+    for byte in ops[1:]:
+        offset |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            break
+    return offset
 
 
 class ElfInfo:
@@ -140,7 +159,7 @@ class ElfInfo:
             loc = child.attributes.get("DW_AT_data_member_location")
             if name is None or loc is None:
                 continue
-            layout[name.value.decode()] = (_int(loc.value), _array_size(child))
+            layout[name.value.decode()] = (member_offset(loc.value), _array_size(child))
         return layout
 
 

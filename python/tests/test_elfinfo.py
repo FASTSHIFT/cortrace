@@ -3,7 +3,7 @@
 import pytest
 from elffixture import FREERTOS_C, NUTTX_C, SMP_C, build
 
-from cortrace.elfinfo import ElfError, ElfInfo
+from cortrace.elfinfo import ElfError, ElfInfo, member_offset
 
 
 @pytest.fixture(name="nuttx_elf", scope="module")
@@ -53,6 +53,25 @@ def test_freertos_layout_reads_the_name_array(tmp_path):
     assert layout["pcTaskName"] == (8, 16)
     assert layout["uxTCBNumber"][0] == 24
     elf.close()
+
+
+def test_dwarf2_member_locations_are_expressions(tmp_path):
+    """-gdwarf-2 (the firmware's setting) stores DW_OP_plus_uconst, not a number."""
+    elf = ElfInfo(build(tmp_path, "dw2", NUTTX_C, "-gdwarf-2"))
+    layout = elf.struct_layout("tcb_s")
+    assert layout["pid"][0] == 48 and layout["entry"][0] == 64
+    elf.close()
+
+
+def test_member_offset_decodes_constants_and_expressions():
+    assert member_offset(52) == 52
+    assert member_offset([0x23, 52]) == 52  # DW_OP_plus_uconst 52
+    assert member_offset([0x23, 0xE4, 0x00]) == 100  # multi-byte ULEB128
+    assert member_offset([0x23, 0x80, 0x02]) == 256
+    with pytest.raises(ElfError, match="unsupported member location"):
+        member_offset([0x91, 0x04])  # DW_OP_fbreg
+    with pytest.raises(ElfError, match="unsupported member location"):
+        member_offset([])
 
 
 def test_declaration_only_structs_are_skipped(tmp_path):
