@@ -38,12 +38,6 @@ std::string exception_name(uint32_t number)
     }
 }
 
-// CoreMark's hot functions are not self-recursive; a product build should
-// derive this from the ELF call graph so genuine recursion is preserved. For
-// now, treating "push callee == current top" as a missed-return is the correct
-// default for non-recursive code.
-static bool is_self_recursive(const std::string&) { return false; }
-
 CallStackMachine::CallStackMachine(const SymbolTable& syms)
     : syms_(syms)
 {
@@ -121,10 +115,11 @@ void CallStackMachine::do_call(const std::string& callee, uint32_t ret)
 {
     auto& stack = cur().stack;
     // Blind-spot guard: about to push a frame whose function equals the current
-    // top and that function is not actually self-recursive => the previous
-    // frame's return was lost to a gap. Pop the stale frame first (net:
-    // re-entry, no runaway depth).
-    if (!stack.empty() && stack.back().fn == callee && !is_self_recursive(callee)) {
+    // top. If the trace lost sync since that frame was pushed, its return may
+    // be in the gap: pop the stale frame first (net: re-entry, no runaway
+    // depth). With no gap in between nothing was lost, so this is genuine
+    // recursion and the frame stays.
+    if (!stack.empty() && stack.back().fn == callee && stack.back().gap != gaps_) {
         CT_LOG_DEBUG("recovered missed return before re-entry into %s (byte %llu)", callee.c_str(),
             static_cast<unsigned long long>(last_byte_index_));
         emit(false, stack.back().fn);
@@ -133,7 +128,7 @@ void CallStackMachine::do_call(const std::string& callee, uint32_t ret)
     }
     const std::string& caller = stack.empty() ? std::string("<root>") : stack.back().fn;
     edges_[caller + " -> " + callee]++;
-    stack.push_back({ callee, ret });
+    stack.push_back({ callee, ret, gaps_ });
     emit(true, callee);
 }
 
@@ -278,6 +273,7 @@ void CallStackMachine::process(const Element& e)
     case ElementKind::TraceOn:
         // Discontinuity: any call/return straddling the gap is lost. Never
         // fabricate flow across it. A call left pending here loses its callee.
+        ++gaps_;
         if (pending_call_) {
             pending_call_ = false;
             CT_LOG_DEBUG("dropped call at byte %llu: pending call straddled a %s discontinuity",

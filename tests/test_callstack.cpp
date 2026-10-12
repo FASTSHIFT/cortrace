@@ -301,20 +301,43 @@ TEST(exception_names_cover_every_class)
     CHECK_EQ(exception_name(31), std::string("IRQ:ext15"));
 }
 
-TEST(callstack_reentry_into_the_top_function_pops_the_stale_frame)
+TEST(callstack_reentry_after_a_gap_pops_the_stale_frame)
 {
-    // leaf is entered, calls "itself" (really: its return was lost and the
-    // next call lands on the same entry again). The stale leaf frame is closed
-    // before the new one opens, so the depth does not run away.
+    // leaf is entered, then the trace loses sync (the return is in the gap) and
+    // the next call lands on the same entry again. The stale leaf frame is
+    // closed before the new one opens, so the depth does not run away.
     SymbolTable syms = make_syms();
     CallStackMachine m(syms);
     m.process(Element::instr_range(0x1000, 0x1008, BranchKind::DirectCall, true));
-    m.process(Element::instr_range(0x2000, 0x2008, BranchKind::DirectCall, true)); // enters leaf
+    m.process(Element::instr_range(0x2000, 0x2008, BranchKind::None, false)); // enters leaf
+    m.process(Element::simple(ElementKind::TraceOn)); // the gap
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::DirectCall, true));
     m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false)); // leaf entry again
     m.finish();
     CHECK_EQ(m.metrics().recovered_missed_returns, 1L);
     CHECK(m.metrics().balanced());
     CHECK(m.metrics().max_depth <= 3);
+}
+
+TEST(callstack_direct_recursion_without_a_gap_is_kept)
+{
+    // leaf calls itself twice and the calls return in order. Nothing was lost,
+    // so every level is a real frame and every return matches one.
+    SymbolTable syms = make_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::DirectCall, true));
+    m.process(Element::instr_range(0x2000, 0x2008, BranchKind::DirectCall, true)); // leaf
+    m.process(Element::instr_range(0x2000, 0x2008, BranchKind::DirectCall, true)); // leaf -> leaf
+    m.process(
+        Element::instr_range(0x2000, 0x2010, BranchKind::None, false)); // leaf -> leaf -> leaf
+    m.process(Element::instr_range(0x2010, 0x2014, BranchKind::Return, true)); // innermost returns
+    m.process(Element::instr_range(0x2008, 0x2014, BranchKind::Return, true)); // middle returns
+    m.process(Element::instr_range(0x2008, 0x2014, BranchKind::Return, true)); // outer returns
+    m.finish();
+    CHECK_EQ(m.metrics().recovered_missed_returns, 0L);
+    CHECK_EQ(m.metrics().mismatched_returns, 0L);
+    CHECK(m.metrics().balanced());
+    CHECK_EQ(m.metrics().max_depth, 4); // root + three nested leaf frames
 }
 
 TEST(callstack_timestamp_and_cycle_count_stamp_later_slices)

@@ -99,6 +99,7 @@ private:
     struct Frame {
         std::string fn;
         uint32_t ret_addr; // expected return address (end of the call range)
+        uint64_t gap = 0; // gaps_ when the frame was pushed
     };
 
     // An execution context = one call stack living on one Perfetto track. The
@@ -137,6 +138,7 @@ private:
     uint64_t last_byte_index_ = 0;
     uint64_t last_etm_ts_ = 0; // most-recent ETM global timestamp value
     uint64_t cycle_clock_ = 0; // accumulated CPU cycles (cycle counting)
+    uint64_t gaps_ = 0; // trace discontinuities (lost sync, unreachable code) so far
     bool pending_call_ = false;
     uint32_t pending_ret_ = 0;
     bool after_blind_ = false;
