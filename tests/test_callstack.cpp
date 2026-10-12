@@ -430,6 +430,8 @@ TEST(callstack_slices_before_the_first_switch_are_boot_slices)
     CallStackMachine m(syms);
     enter_leaf(m);
     m.switch_thread(7);
+    // the boot context's open frames end where scheduling takes over
+    CHECK_EQ(m.metrics().ends, 1L);
     m.finish();
     CHECK(m.metrics().balanced());
     for (auto& s : m.slices())

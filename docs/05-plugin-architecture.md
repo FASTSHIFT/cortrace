@@ -168,7 +168,10 @@ class OsPlugin:
 | FreeRTOS，纯 OpenOCD（无 Tcl）+ `cortrace arm` + `cortrace capture` | 4/4 指针解析出 `sensor`/`worker`/`calc`/`blink`；ETM 流 clean，262 万次调用 begin/end 配平；`blink` 10 次/秒、`sensor` 200 次/秒（5 ms 周期）、`worker`/`calc` 约 1 ms 一段（同优先级时间片轮转） |
 | 重复写入折叠 | 1436 个 DWT 事件折叠成 1236 个 run，差值正好是 `sensor` 每秒 200 次 `taskYIELD()` |
 
-实测发现并修掉的一个真实问题：固件用 `-gdwarf-2`，成员偏移是表达式而不是常量，起初解析出的偏移全错，所有线程都解析不出来。
+实测发现并修掉的两个真实问题：
+
+- 固件用 `-gdwarf-2`，成员偏移是表达式而不是常量，起初解析出的偏移全错，所有线程都解析不出来。
+- **调用栈机原本只有一个栈，所有线程共用。** 线程在 `xTaskDelayUntil` 里被切走时，它的栈帧还开着，下一个线程的返回会把这些帧弹掉，或者被它们压住，于是 `sensor` 泳道里的 `xTaskDelayUntil` 一层层叠到 65 层，`worker` 到 289 层。现在 DWT 的切换事件在解码时就交给调用栈机，每个线程一个栈（`switch_thread`）；切换发生在 PendSV 里时立即生效，因为 ISR 的栈本来就是独立的。修好后 `sensor` 最深 2 层，`xTaskDelayUntil` 每次约 4.98 ms，正好是 5 ms 周期。线程切换事件与 ETM 字节的相对位置有偏差的话，切换点会偏几条指令，目前没看到影响。
 
 ## 10. 未决问题
 

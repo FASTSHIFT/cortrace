@@ -83,7 +83,16 @@ void CallStackMachine::switch_thread(int tid)
     if (tid == cur_thread_)
         return;
     auto& base = ctx_.front().stack;
-    parked_[cur_thread_] = std::move(base);
+    if (cur_thread_ == kThreadBoot) {
+        // The context that ran before the first switch is not a thread we can
+        // name or find again: its frames end where scheduling takes over.
+        while (base.size() > 1) {
+            emit_to(false, base.back().fn, ctx_.front().track, kThreadBoot, base.size());
+            base.pop_back();
+        }
+    } else {
+        parked_[cur_thread_] = std::move(base);
+    }
     auto it = parked_.find(tid);
     if (it != parked_.end()) {
         base = std::move(it->second);
