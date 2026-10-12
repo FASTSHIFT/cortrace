@@ -30,6 +30,8 @@ Linux >= 5.7).
 | `cortrace serve` | in ui.perfetto.dev choose *Record new trace -> Linux -> WebSocket 127.0.0.1:8037* and press **Start**: the capture runs and the result comes back in the same page |
 | `cortrace decode` | run `cortrace-decode` (ETM/DWT/ITM -> Perfetto) directly, arguments passed through |
 | `cortrace tcbmap` | read the live thread-name map |
+| `cortrace arm` | arm ETM/ITM/DWT through a running OpenOCD (chips live in `platforms/`) |
+| `cortrace os` | OS plugins (NuttX and FreeRTOS built in): list, find the watched variable, resolve thread names |
 | `cortrace fpga ctrl\|net\|health` | CSR control, link discovery and health readout of the capture appliance |
 | `cortrace open` | open a trace file in ui.perfetto.dev |
 

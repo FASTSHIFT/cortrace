@@ -80,6 +80,7 @@ flowchart TD
 1. 目标板的 ETM / DWT / ITM 必须由调试器配置好，并且**调试器要一直连着**（它持有 `C_DEBUGEN`，否则 NuttX 会把
    DWT 配置清掉）。cortrace 只负责采集和解码，不负责在目标上启用 trace。本仓库的参考做法是
    cortrace-fpga 里的 `nxtrace_rtt.sh`（OpenOCD 常驻会话，启动时打印 `nxtrace_dap: armed`）。
+   也可以用 `cortrace arm` 通过常驻 OpenOCD 的 telnet 口布防，不需要 Tcl 配置，见 4.5 节。
 2. FPGA 采集器通过网线直连 PC。采集用的网口需要配置主机地址 `<HOST_IP>`/24（FPGA 往这个地址推 UDP 流，
    端口 5555）。这一步需要 root，而且 `ip addr add` 重启后会丢，**建议一次性配成持久的**，见下面
    "网口地址"一节。主机地址不对时现象是 ARP 正常、但抓到 0 字节。具体地址见 cortrace-fpga 的文档。
@@ -205,12 +206,26 @@ stream health : lost-sync=0 overflow=0 resync(TraceOn)=0 addr-nacc=0 ... -> clea
 | `--time-base etm` | 用 ETM 时间戳（墙钟）；需要 `--tsgen-hz` |
 | `--time-base hybrid` | 墙钟时间戳之间用周期数插值，睡眠期间不漂、片段内有周期分辨率；需要 `--tsgen-hz` 和 `--sysclk-hz` |
 | `--tsgen-hz` / `--sysclk-hz` | ETM 时间戳时钟 / CPU 时钟（默认 150 MHz） |
-| `--tcbmap FILE` | 线程名映射（见下），没有的话线程显示成 `tcb@0x…` |
+| `--os NAME` | 给线程起名的 OS 插件：`auto`（默认，按 ELF 里的符号判断）、`nuttx`、`freertos`、`none`；`cortrace os list` 看全部 |
+| `--probe-telnet HOST:PORT` | 常驻 OpenOCD 的 telnet 口（通常 `127.0.0.1:4444`），插件用它读目标上的 TCB，拿到线程名。FreeRTOS 的线程名只在目标内存里，必须给 |
+| `--tcbmap FILE` | 额外的线程映射（`cortrace tcbmap` 的输出），优先于插件的结果 |
 | `--raw-in FILE` | 不抓取，直接解码一份已有的 raw 文件 |
 | `--open` | 完成后在浏览器里打开结果 |
 | `--no-banner` | 不打印启动 logo（也可设 `CORTRACE_NO_BANNER=1`；logo 只在终端里显示） |
 
-**线程名映射**：NuttX 的 TCB 在堆上，不在 ELF 里。目标跑起来后，通过常驻的 OpenOCD 读活线程表：
+**线程名**：DWT 抓到的是"当前任务指针"，要变成名字得读 TCB。`capture` 会自动做三件事：让解码器列出抓到的指针，
+让 OS 插件（`--os`）读 TCB 解析出名字，再带着结果（`threads_<tag>.txt`）完整解码。TCB 结构的偏移从 ELF 的
+DWARF 里读，所以固件要带 `-g`；NuttX 上游与 Vela 的偏移不同也不用管。
+
+```sh
+# NuttX 或 FreeRTOS，常驻 OpenOCD 在 127.0.0.1:4444
+cortrace capture --elf fw.elf --secs 1 --width 4 --probe-telnet 127.0.0.1:4444
+```
+
+解析不出来的指针显示成 `tcb@0x…`。要加自己的 OS，写一个定义了 `PLUGIN` 的 Python 模块放到
+`~/.config/cortrace/plugins/` 或 `$CORTRACE_PLUGIN_PATH`，接口见 `docs/05-plugin-architecture.md`。
+
+**旧办法：线程名映射**（`cortrace tcbmap`）。NuttX 的 TCB 在堆上，不在 ELF 里。目标跑起来后，通过常驻的 OpenOCD 读活线程表：
 
 ```sh
 cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out tcbmap.txt
@@ -311,6 +326,20 @@ features: DDR3 ring, stream self-test, run-time port width
 | `cortrace fpga ctrl set-width 4` | 设置 FPGA 的 TPIU 位宽并重新武装；还有 `rearm`、`set-bitlen`、`stream-selftest`、`iddr-prbs` |
 | `cortrace fpga health [ip] [--check {health,ddr3,blackbox}] [--reset]` | 读 FPGA 的调试寄存器并给出诊断 |
 | `cortrace fpga net` | ARP 探测 FPGA 接在哪个网口（需要 `CAP_NET_RAW`） |
+| `cortrace arm --platform P --elf fw.elf --probe-telnet HOST:PORT` | 通过常驻 OpenOCD 给目标布防 ETM/ITM/DWT；`--list` 列出平台，`--no-etm` 只布防 ITM/DWT，`--width` 设 TPIU 位宽 |
+| `cortrace os list` / `os watch --elf fw.elf` / `os resolve …` | 列出 OS 插件 / 打印 DWT 要监视的变量与地址 / 把指针值解析成线程映射 |
+
+**布防**：先起一个不带任何 trace 配置的 OpenOCD，让它常驻（它持有 `C_DEBUGEN`），然后：
+
+```sh
+openocd -f interface/cmsis-dap.cfg -f target/stm32h7x.cfg &      # 常驻，telnet 口 4444
+cortrace arm --platform stm32h743 --elf fw.elf --probe-telnet 127.0.0.1:4444
+```
+
+要监视哪个变量由 ELF 里的 OS 插件决定（NuttX 的 `g_running_tasks`、FreeRTOS 的 `pxCurrentTCB`），没有 OS 时用
+`--watch-addr ADDR`。芯片相关的部分（CoreSight 组件地址、管脚复用、`DBGMCU_CR`）在 `platforms/<名字>.toml` 里；
+新芯片复制一份改地址即可，放到 `~/.config/cortrace/platforms/` 或 `$CORTRACE_PLATFORM_PATH` 就能被找到。
+这等价于 cortrace-fpga 里的 `nxtrace_dap.cfg`，那一份仍然可用。
 
 ## 5. 网页点击模式
 
@@ -442,7 +471,7 @@ flowchart TD
 | `--secs … is longer than 5 s` | 确实要抓更长就加 `--allow-long` |
 | `cortrace-grab failed`，或抓到 0 字节 | 先 `ip -br addr show <nic>`：网口没有 `<HOST_IP>`（重启后 `ip addr add` 会丢，见第 2 节"网口地址"）或是 `NO-CARRIER`；再查 5555 端口是否被上一次没退出的抓取占着：`fuser -k 5555/udp` |
 | 解码摘要里 `lost-sync` / `overflow` 不为 0 | ETM 在片上溢出：降低 CPU 频率、关掉不需要的 note（syscall/heap），或降低 trace 量。note 走 ITM 时也占 TPIU 带宽 |
-| 线程名都是 `tcb@0x…` | 没给 `--tcbmap`；用 `cortrace tcbmap` 生成（需要调试器的 OpenOCD 常驻） |
+| 线程名都是 `tcb@0x…` | 没给 `--probe-telnet`（OS 插件读不到 TCB），或 OpenOCD 没常驻；日志里看 `[cortrace-os] … resolved N of M pointers`。固件没带 `-g` 时会报找不到 TCB 的 DWARF |
 | `warning: no note bytes on ITM port N` | 固件没往这个端口写 note（端口号不对：上游默认 1，Vela 是 0，用 `--itm-port`），或者 ITM 没使能（调试器没武装），或者没开 note 驱动 |
 | `nxtrace merge` 报 `no common offset` 或配上的数量很少 | 硬件和 note 的线程切换对不上：两边不是同一次运行，或丢了 note（看抓取日志里 `itm notes … OVERFLOW`，降低 note 量后重抓），或者 `--freq` 不是给 note 打时间戳的时钟频率 |
 | note 的时间戳一直是 10 ms 的整数倍 | 固件没开 `ARCH_PERF_EVENTS`（Vela），note 用的是系统 tick，不是 DWT 周期计数 |
@@ -456,7 +485,9 @@ flowchart TD
 sudo apt install ./cortrace_*_amd64.deb                       # 安装
 export CORTRACE_OUT_DIR=~/traces CORTRACE_IFACE=<nic>          # 一次性设置
 cortrace capture --elf fw.elf --secs 1 --width 4 --open        # 独立模式
-cortrace capture --notes --itm-port 1 --elf nuttx --secs 1 --tag t --tcbmap m.txt   # 另外写出 note 字节流和线程切换日志
+cortrace arm --platform stm32h743 --elf fw.elf --probe-telnet 127.0.0.1:4444   # 布防 trace 硬件
+cortrace capture --elf fw.elf --secs 1 --probe-telnet 127.0.0.1:4444           # 线程名由 OS 插件读出
+cortrace capture --notes --itm-port 1 --elf nuttx --secs 1 --tag t --probe-telnet 127.0.0.1:4444   # 另外写出 note 字节流和线程切换日志
 cortrace serve --elf nuttx --tcbmap m.txt                      # 网页点击（浏览器里点 Start）
 cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out m.txt  # 线程名映射
 python -m nxtrace merge -o fused.tar --hw hw_t.perfetto --hw-switches hwruns_t.tsv \

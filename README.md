@@ -26,6 +26,8 @@ cortrace --help
 | `cortrace serve` | 在 ui.perfetto.dev 的 *Record new trace → Linux → WebSocket 127.0.0.1:8037* 里点 **Start** 即抓取，结果回到同一页面 |
 | `cortrace decode` | 直接调用 `cortrace-decode`（ETM/DWT/ITM → Perfetto），参数原样透传 |
 | `cortrace tcbmap` | 读活线程名映射 |
+| `cortrace arm` | 通过常驻 OpenOCD 布防 ETM/ITM/DWT（芯片见 `platforms/`） |
+| `cortrace os` | OS 插件（NuttX、FreeRTOS 内置）：列出、查监视变量、解析线程名 |
 | `cortrace fpga ctrl\|net\|health` | FPGA 采集器的 CSR 控制、链路发现、健康读出 |
 | `cortrace open` | 在 ui.perfetto.dev 打开一个 trace 文件 |
 
