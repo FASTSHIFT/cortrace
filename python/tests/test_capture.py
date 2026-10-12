@@ -15,6 +15,12 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("CORTRACE_IFACE", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def no_thread_resolution(monkeypatch):
+    """The thread-name step has its own tests (test_osctl)."""
+    monkeypatch.setattr(capture, "build_thread_map", lambda *_a: "map.txt")
+
+
 def test_output_dir_must_be_given_explicitly(capsys):
     with pytest.raises(SystemExit) as e:
         parse("--iface", "eth0")
@@ -58,11 +64,11 @@ def args(tmp_path, *extra, **kw):
     [("cycle", "--cycle-time"), ("etm", "--etm-time"), ("hybrid", "--hybrid-time")],
 )
 def test_decode_command_time_bases(tmp_path, base, expect):
-    a = args(tmp_path, time_base=base, tsgen_hz=75e6, phase="1,0", tcbmap="m.txt")
-    cmd = capture.decode_command(a, "raw", "out.pf", "syms")
+    a = args(tmp_path, time_base=base, tsgen_hz=75e6, phase="1,0")
+    cmd = capture.decode_command(a, "raw", "out.pf", "syms", "m.txt")
     assert expect in cmd and cmd[cmd.index("--perf") + 1] == "out.pf"
     assert cmd[cmd.index("--phase") + 1] == "1,0"
-    assert cmd[cmd.index("--nx-tcbmap") + 1] == "m.txt"
+    assert cmd[cmd.index("--thread-map") + 1] == "m.txt"
     assert cmd[cmd.index("--trace-width") + 1] == "4"
     assert "--itm-note-out" not in cmd  # no notes unless asked
 
@@ -80,7 +86,7 @@ def test_notes_ask_the_decoder_for_the_note_stream_and_the_switch_log(tmp_path):
     assert cmd[cmd.index("--itm-note-port") + 1] == "0"
     assert "--itm-note-unwrap" in cmd
     assert cmd[cmd.index("--itm-note-out") + 1] == str(tmp_path / "notes_t.bin")
-    assert cmd[cmd.index("--nx-runs-out") + 1] == str(tmp_path / "hwruns_t.tsv")
+    assert cmd[cmd.index("--runs-out") + 1] == str(tmp_path / "hwruns_t.tsv")
 
 
 def test_notes_use_the_hybrid_time_base_with_a_default_tsgen(tmp_path):

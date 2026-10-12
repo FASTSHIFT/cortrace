@@ -36,10 +36,17 @@ def flags(cmd):
 def capture_command(tmp_path, base, *extra):
     a = capture.parse_args(
         ["--out-dir", str(tmp_path), "--elf", "e", "--raw-in", "r"]
-        + ["--time-base", base, "--tsgen-hz", "75e6", "--tcbmap", "m", "--phase", "1,0"]
+        + ["--time-base", base, "--tsgen-hz", "75e6", "--phase", "1,0"]
         + list(extra)
     )
-    return capture.decode_command(a, "raw", "out.pf", "syms.nm")
+    return capture.decode_command(a, "raw", "out.pf", "syms.nm", "threads.txt")
+
+
+def test_dump_switch_values_flags_exist(help_text, tmp_path):
+    a = capture.parse_args(["--out-dir", str(tmp_path), "--elf", "e", "--raw-in", "r"])
+    cmd = capture.base_command(a, "raw", "syms.nm") + ["--dump-switch-values", "v"]
+    missing = [f for f in sorted(flags(cmd)) if f not in help_text]
+    assert not missing, f"cortrace-decode no longer has: {missing}"
 
 
 @pytest.mark.parametrize("base", ["cycle", "etm", "hybrid"])
@@ -54,7 +61,7 @@ def test_capture_notes_flags_exist(help_text, tmp_path):
     cmd = capture_command(tmp_path, "cycle", "--notes")
     missing = [f for f in sorted(flags(cmd)) if f not in help_text]
     assert not missing, f"cortrace-decode no longer has: {missing}"
-    for flag in ("--itm-note-out", "--nx-runs-out", "--itm-note-unwrap"):
+    for flag in ("--itm-note-out", "--runs-out", "--itm-note-unwrap"):
         assert flag in cmd
 
 

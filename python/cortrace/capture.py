@@ -23,10 +23,13 @@ import sys
 import tempfile
 import time
 
-from . import runstore
+from . import osctl, osplugins, runstore
 from ._paths import find_binary
+from .elfinfo import ElfError
 from .fpga import ctrl
+from .osplugins import threadmap
 from .perfetto_open import main as perfetto_open_main
+from .probe import ProbeError
 
 DEFAULT_TSGEN_HZ = 75e6  # ETM timestamp clock of the STM32H7 bring-up (HCLK)
 
@@ -86,8 +89,31 @@ def add_capture_options(ap):
         help="ETM timestamp clock (needed by the etm and hybrid time bases; "
         f"--notes defaults to {DEFAULT_TSGEN_HZ:g})",
     )
-    ap.add_argument("--nx-switch-stream", type=int, default=1)
-    ap.add_argument("--tcbmap", default=None, help="thread-name map (cortrace tcbmap)")
+    ap.add_argument(
+        "--switch-stream",
+        "--nx-switch-stream",
+        dest="switch_stream",
+        type=int,
+        default=1,
+        help="TPIU stream with the DWT current-task writes (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--os",
+        default="auto",
+        help="OS plugin that names the threads: a plugin name (see `cortrace os "
+        "list`), 'auto' to detect it from the ELF, or 'none' (default: auto)",
+    )
+    ap.add_argument(
+        "--probe-telnet",
+        default=None,
+        metavar="HOST:PORT",
+        help="read live target memory (task names) through a running OpenOCD",
+    )
+    ap.add_argument(
+        "--tcbmap",
+        default=None,
+        help="thread map that overrides the plugin's answers (cortrace tcbmap)",
+    )
     ap.add_argument("--phase", default=None, help="lock deframe phase, e.g. 1,0")
 
 
@@ -164,8 +190,8 @@ def time_base_args(a):
     ]
 
 
-def decode_command(a, raw, perf, syms):
-    """cortrace-decode command line."""
+def base_command(a, raw, syms):
+    """cortrace-decode command line up to the part every mode shares."""
     cmd = [
         find_binary("CORTRACE_DECODE", "cortrace-decode"),
         raw,
@@ -177,21 +203,48 @@ def decode_command(a, raw, perf, syms):
         str(a.width or 4),
         "--memory-limit-mb",
         "0",
-        "--nx-switch-stream",
-        str(a.nx_switch_stream),
+        "--switch-stream",
+        str(a.switch_stream),
     ]
+    if a.phase:
+        cmd += ["--phase", a.phase]
+    return cmd
+
+
+def decode_command(a, raw, perf, syms, thread_map=None):
+    """cortrace-decode command line."""
+    cmd = base_command(a, raw, syms)
     cmd += time_base_args(a) + ["--perf", perf]
     if a.notes:
         notes, runs = note_paths(a)
         # The notes are stamped with the 32-bit DWT_CYCCNT; the decoder widens
         # it to 64 bits across counter wraps (every ~28.6 s at 150 MHz).
         cmd += ["--itm-note-port", str(a.itm_port), "--itm-note-unwrap"]
-        cmd += ["--itm-note-out", notes, "--nx-runs-out", runs]
-    if a.phase:
-        cmd += ["--phase", a.phase]
-    if a.tcbmap:
-        cmd += ["--nx-tcbmap", a.tcbmap]
+        cmd += ["--itm-note-out", notes, "--runs-out", runs]
+    if thread_map:
+        cmd += ["--thread-map", thread_map]
     return cmd
+
+
+def build_thread_map(a, raw, syms):
+    """Name the threads of this capture: ask the decoder which pointers the DWT
+    saw, let the OS plugin resolve them, and write the thread map. Returns the
+    map's path."""
+    values = os.path.join(a.out_dir, f"switches_{a.tag}.txt")
+    cmd = base_command(a, raw, syms) + ["--dump-switch-values", values]
+    if run_cmd(cmd, capture_output=True, text=True).returncode != 0:
+        sys.exit("could not read the thread switches from the capture")
+    extra = threadmap.read_map(a.tcbmap) if a.tcbmap else None
+    try:
+        threads = osctl.resolve_threads(
+            a.elf, a.os, threadmap.read_values(values), a.probe_telnet, extra
+        )
+    except (osplugins.PluginError, ElfError, ProbeError) as exc:
+        sys.exit(f"thread names: {exc}")
+    path = os.path.join(a.out_dir, f"threads_{a.tag}.txt")
+    threadmap.write_map(path, threads)
+    os.remove(values)
+    return path
 
 
 def decode_hw(a, raw):
@@ -200,7 +253,9 @@ def decode_hw(a, raw):
     syms = os.path.join(tempfile.gettempdir(), f"cortrace_capture_{os.getpid()}.nm")
     with open(syms, "w", encoding="utf-8") as f:
         subprocess.run([a.nm, "-n", a.elf], stdout=f, check=True)
-    proc = run_cmd(decode_command(a, raw, perf, syms), capture_output=True, text=True)
+    tmap = build_thread_map(a, raw, syms)
+    cmd = decode_command(a, raw, perf, syms, tmap)
+    proc = run_cmd(cmd, capture_output=True, text=True)
     keys = ("stream health", "begins / ends", "wrote", "error", "itm notes: port")
     for line in (proc.stderr + proc.stdout).splitlines():
         if any(k in line for k in keys):

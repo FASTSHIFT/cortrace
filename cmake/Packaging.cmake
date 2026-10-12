@@ -50,7 +50,7 @@ set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SECTION devel)
 set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/FASTSHIFT/cortrace")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3 (>= 3.10)")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "python3 (>= 3.10), python3-pyelftools")
 # arm-none-eabi-nm reads the ELF symbols; openocd arms/reads the target.
 set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "binutils-arm-none-eabi")
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "openocd")

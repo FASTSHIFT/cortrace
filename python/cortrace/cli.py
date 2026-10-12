@@ -17,6 +17,7 @@ SUMMARIES = {
     "capture": "grab a raw capture from the FPGA streamer, decode it and open",
     "serve": 'Perfetto "Record" target: press Start in the UI to capture and view',
     "tcbmap": "dump the live pid -> thread-name map through OpenOCD",
+    "os": "OS plugins: list, find the variable to watch, resolve thread names",
     "open": "open a Perfetto trace in ui.perfetto.dev",
     "fpga": "FPGA streamer tools: ctrl (CSR writes), net (find the link), health",
     "version": "print the version",
@@ -62,6 +63,7 @@ COMMANDS = {
     "capture": _lazy("capture"),
     "serve": _lazy("serve"),
     "tcbmap": _lazy("tcbmap"),
+    "os": _lazy("osctl"),
     "open": _lazy("perfetto_open"),
 }
 

@@ -30,7 +30,7 @@ docker run --rm -v "$DEB":/pkg/cortrace.deb:ro -e WANT="$WANT" "$IMAGE" bash -eu
     [ -z "$(ls /usr/lib/cortrace 2>/dev/null)" ]   # OpenCSD is linked statically
 
     echo "== python package"
-    run "python3 -c \"import cortrace.cli, cortrace.capture, cortrace.serve, cortrace.tcbmap, cortrace.fpga.health, cortrace.fpga.ctrl; print(cortrace.__version__)\""
+    run "python3 -c \"import cortrace.cli, cortrace.capture, cortrace.serve, cortrace.tcbmap, cortrace.fpga.health, cortrace.fpga.ctrl, cortrace.osctl, cortrace.osplugins.nuttx, cortrace.osplugins.freertos; print(cortrace.__version__)\""
 
     echo "== output directory is never defaulted"
     out="$(run "cortrace capture --elf /bin/true --iface lo 2>&1" || true)"
