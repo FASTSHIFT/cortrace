@@ -3,8 +3,9 @@
 [简体中文](README.md) | **English**
 
 **Cortrace** turns raw ARM CoreSight ETM/DWT/ITM trace bytes into a function-level
-[Perfetto](https://ui.perfetto.dev) timeline: call stacks, RTOS thread lanes and (NuttX)
-software notes fused with the hardware trace on one time axis. It decodes with the official
+[Perfetto](https://ui.perfetto.dev) timeline: call stacks and RTOS thread lanes. It produces the
+hardware trace only; putting NuttX's software notes on the same time axis is `nxtrace merge` in
+pynuttx. It decodes with the official
 ARM/Linaro reference decoder [OpenCSD](https://github.com/Linaro/OpenCSD) and ships the PC-side
 tools for the FPGA parallel-trace capture appliance.
 
@@ -25,11 +26,10 @@ Linux >= 5.7).
 
 | Command | What it does |
 |---------|--------------|
-| `cortrace capture` | grab a parallel trace from the FPGA and decode it to Perfetto (`--fuse` also fuses the NuttX notes) |
+| `cortrace capture` | grab a parallel trace from the FPGA and decode it to Perfetto (`--notes` also writes the bytes on an ITM stimulus port and the hardware thread-switch log, the inputs of `nxtrace merge`) |
 | `cortrace serve` | in ui.perfetto.dev choose *Record new trace -> Linux -> WebSocket 127.0.0.1:8037* and press **Start**: the capture runs and the result comes back in the same page |
 | `cortrace decode` | run `cortrace-decode` (ETM/DWT/ITM -> Perfetto) directly, arguments passed through |
-| `cortrace fuse` | one raw capture -> hardware trace + NuttX notes fused on one time axis |
-| `cortrace tcbmap` / `align` | read the live thread-name map / fit the clock offset between hardware and notes |
+| `cortrace tcbmap` | read the live thread-name map |
 | `cortrace fpga ctrl\|net\|health` | CSR control, link discovery and health readout of the capture appliance |
 | `cortrace open` | open a trace file in ui.perfetto.dev |
 
@@ -46,10 +46,10 @@ cortrace serve   --iface enx0123 --elf fw.elf          # then press Start in the
 ```
 
 > cortrace does not enable ETM/DWT/ITM on the target: configure them with your debugger first and
-> keep it attached. Fusing with NuttX's nxtrace needs pynuttx (the pip package, or `--pynuttx DIR` /
-> `$PYNUTTX` pointing at its sources).
+> keep it attached. Merging with NuttX's notes is done by `nxtrace merge` in pynuttx; cortrace does
+> not depend on pynuttx.
 
-**The full walkthrough (standalone, hardware + software fusion, click-to-capture in the browser,
+**The full walkthrough (capture and decode, capture with notes, click-to-capture in the browser,
 troubleshooting) is in [`docs/04-user-guide.md`](docs/04-user-guide.md)** (written in Chinese).
 
 ## Why
@@ -169,7 +169,7 @@ requires subjects of the form `type(scope): description`; only `docs` may omit t
 include/cortrace/   Public headers (element / symbols / callstack ...)
 src/                Core implementation (no OpenCSD dependency)
 tools/              cortrace-decode (C++), cortrace-grab (C, FPGA UDP capture)
-python/cortrace/    the cortrace command line and Python package (capture / serve / fuse / fpga ...)
+python/cortrace/    the cortrace command line and Python package (capture / serve / tcbmap / fpga ...)
 python/tests/       Python unit tests
 tests/              Zero-dependency C++ unit tests + framework
 cmake/              CodeCoverage.cmake (gcovr + gate), Packaging.cmake (install + deb)

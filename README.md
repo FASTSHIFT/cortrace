@@ -3,8 +3,8 @@
 **简体中文** | [English](README_en.md)
 
 **Cortrace** 把 ARM CoreSight ETM/DWT/ITM trace 原始字节流转换成函数级
-[Perfetto](https://ui.perfetto.dev) 时间线：调用栈、RTOS 线程泳道，以及（NuttX）软件 note
-与硬件 trace 融合在同一条时间轴上。它用 ARM/Linaro 官方参考解码器
+[Perfetto](https://ui.perfetto.dev) 时间线：调用栈、RTOS 线程泳道。它只产生硬件 trace；要和 NuttX 的软件 note
+放到同一条时间轴上，用 pynuttx 的 `nxtrace merge`。它用 ARM/Linaro 官方参考解码器
 [OpenCSD](https://github.com/Linaro/OpenCSD) 解码，并自带 FPGA 并口采集器的 PC 侧工具。
 
 > 设计理念与路线图见 [`docs/00-architecture.md`](docs/00-architecture.md)。
@@ -22,11 +22,10 @@ cortrace --help
 
 | 命令 | 作用 |
 |------|------|
-| `cortrace capture` | 从 FPGA 抓一段并口 trace → 解码成 Perfetto（`--fuse` 同时融合 NuttX note） |
+| `cortrace capture` | 从 FPGA 抓一段并口 trace → 解码成 Perfetto（`--notes` 另外写出 ITM 上的 note 字节流和硬件线程切换日志，给 `nxtrace merge` 用） |
 | `cortrace serve` | 在 ui.perfetto.dev 的 *Record new trace → Linux → WebSocket 127.0.0.1:8037* 里点 **Start** 即抓取，结果回到同一页面 |
 | `cortrace decode` | 直接调用 `cortrace-decode`（ETM/DWT/ITM → Perfetto），参数原样透传 |
-| `cortrace fuse` | 一份原始抓取 → 硬件 trace + NuttX note，融合在同一条时间轴 |
-| `cortrace tcbmap` / `align` | 读活线程名映射 / 拟合硬件与 note 的时钟偏移 |
+| `cortrace tcbmap` | 读活线程名映射 |
 | `cortrace fpga ctrl\|net\|health` | FPGA 采集器的 CSR 控制、链路发现、健康读出 |
 | `cortrace open` | 在 ui.perfetto.dev 打开一个 trace 文件 |
 
@@ -41,9 +40,9 @@ cortrace serve   --iface enx0123 --elf fw.elf          # 然后在网页里点 S
 ```
 
 > 本工具不负责在目标上启用 ETM/DWT/ITM：先用调试器配置好并保持连接。
-> 与 NuttX 的 nxtrace 融合需要 pynuttx（`pip install` 的包，或 `--pynuttx DIR` / `$PYNUTTX` 指向其源码）。
+> 和 NuttX 的 note 合并由 pynuttx 的 `nxtrace merge` 完成，cortrace 不依赖 pynuttx。
 
-**完整的使用步骤（独立模式、软硬融合、网页点击、排错）见 [`docs/04-user-guide.md`](docs/04-user-guide.md)。**
+**完整的使用步骤（抓取解码、带 note 的抓取、网页点击、排错）见 [`docs/04-user-guide.md`](docs/04-user-guide.md)。**
 
 ## 为什么
 
@@ -151,7 +150,7 @@ black/pylint 时**阻止提交**。`commit-msg` 钩子要求主题为 `type(scop
 include/cortrace/   公共头文件（element / symbols / callstack …）
 src/                核心实现（不依赖 OpenCSD）
 tools/              cortrace-decode（C++）、cortrace-grab（C，FPGA UDP 采集）
-python/cortrace/    cortrace 命令行与 Python 包（capture / serve / fuse / fpga …）
+python/cortrace/    cortrace 命令行与 Python 包（capture / serve / tcbmap / fpga …）
 python/tests/       Python 单元测试
 tests/              C++ 零依赖单元测试 + 框架
 cmake/              CodeCoverage.cmake（gcovr + 门禁）、Packaging.cmake（install + deb）
