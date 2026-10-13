@@ -86,7 +86,7 @@ def test_notes_ask_the_decoder_for_the_note_stream_and_the_switch_log(tmp_path):
     assert cmd[cmd.index("--itm-note-port") + 1] == "0"
     assert "--itm-note-unwrap" in cmd
     assert cmd[cmd.index("--itm-note-out") + 1] == str(tmp_path / "notes_t.bin")
-    assert cmd[cmd.index("--runs-out") + 1] == str(tmp_path / "hwruns_t.tsv")
+    assert "--runs-out" not in cmd  # the Threads track is the switch log
 
 
 def test_notes_use_the_hybrid_time_base_with_a_default_tsgen(tmp_path):
@@ -165,7 +165,7 @@ def test_run_with_notes_reports_where_they_went(monkeypatch, tmp_path, capsys):
     result = capture.run(args(tmp_path / "out", "--notes"), raw_in=str(raw))
     assert result == str(tmp_path / "out" / "hw_t.perfetto")
     err = capsys.readouterr().err
-    assert "notes_t.bin" in err and "hwruns_t.tsv" in err and "warning" not in err
+    assert "notes_t.bin" in err and "hwruns" not in err and "warning" not in err
 
 
 @pytest.mark.parametrize("notes", [None, b""])

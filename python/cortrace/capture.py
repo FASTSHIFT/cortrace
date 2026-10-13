@@ -4,8 +4,8 @@
   2. stream N seconds of UDP trace into a file              (cortrace-grab)
   3. decode raw -> Perfetto                                 (cortrace-decode)
      --notes: also write the software trace bytes that ride on an ITM stimulus
-              port (notes_<tag>.bin) and the hardware thread-switch log
-              (hwruns_<tag>.tsv), the inputs of `nxtrace merge`
+              port (notes_<tag>.bin), the input of `nxtrace merge` next to
+              hw_<tag>.perfetto, whose Threads track is the thread switch log
   4. optionally open the result in ui.perfetto.dev
 
 The output directory is always given by the user (--out-dir or
@@ -63,9 +63,9 @@ def add_capture_options(ap):
     ap.add_argument(
         "--notes",
         action="store_true",
-        help="also write notes_<tag>.bin (the bytes on the ITM stimulus port) and "
-        "hwruns_<tag>.tsv (the hardware thread switches) for `nxtrace merge`; "
-        "uses the hybrid time base",
+        help="also write notes_<tag>.bin (the bytes on the ITM stimulus port) "
+        "for `nxtrace merge` (the thread switches it needs are in the hardware "
+        "trace's Threads track); uses the hybrid time base",
     )
     ap.add_argument(
         "--itm-port",
@@ -163,12 +163,9 @@ def grab(a, raw):
         sys.exit("cortrace-grab failed")
 
 
-def note_paths(a):
-    """(note stream, hardware switch log) written by --notes."""
-    return (
-        os.path.join(a.out_dir, f"notes_{a.tag}.bin"),
-        os.path.join(a.out_dir, f"hwruns_{a.tag}.tsv"),
-    )
+def note_path(a):
+    """The note stream written by --notes."""
+    return os.path.join(a.out_dir, f"notes_{a.tag}.bin")
 
 
 def time_base_args(a):
@@ -216,11 +213,10 @@ def decode_command(a, raw, perf, syms, thread_map=None):
     cmd = base_command(a, raw, syms)
     cmd += time_base_args(a) + ["--perf", perf]
     if a.notes:
-        notes, runs = note_paths(a)
         # The notes are stamped with the 32-bit DWT_CYCCNT; the decoder widens
         # it to 64 bits across counter wraps (every ~28.6 s at 150 MHz).
         cmd += ["--itm-note-port", str(a.itm_port), "--itm-note-unwrap"]
-        cmd += ["--itm-note-out", notes, "--runs-out", runs]
+        cmd += ["--itm-note-out", note_path(a)]
     if thread_map:
         cmd += ["--thread-map", thread_map]
     return cmd
@@ -263,14 +259,13 @@ def decode_hw(a, raw):
     if proc.returncode != 0 or not os.path.isfile(perf):
         sys.exit("decode failed")
     if a.notes:
-        notes, runs = note_paths(a)
+        notes = note_path(a)
         if not os.path.isfile(notes) or os.path.getsize(notes) == 0:
             log(
                 f"warning: no note bytes on ITM port {a.itm_port} -- does the "
                 "firmware write its notes there, and is the ITM enabled?"
             )
         log(f"notes: {notes}")
-        log(f"hardware switches: {runs}")
     return perf
 
 

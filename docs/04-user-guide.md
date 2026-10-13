@@ -18,7 +18,7 @@ cortrace **只产生硬件 trace**。抓取、解码、线程名映射都在这�
 | 内容 | ETM 函数调用栈 + DWT 线程泳道 | 另外写出 ITM 上的 note 字节流和硬件侧的线程切换日志 |
 | 目标固件 | 任意 Cortex-M 固件（裸机、RTOS 均可）；线程泳道需要 NuttX | NuttX，note 写到一个 ITM 刺激端口（上游 `CONFIG_ARMV7M_NOTE_ITM`，Vela 的 `DRIVERS_NOTEITM`） |
 | 命令 | `cortrace capture` | `cortrace capture --notes`，然后 `nxtrace merge`（见 4.2） |
-| 产物 | `hw_<tag>.perfetto` | 再加 `notes_<tag>.bin`、`hwruns_<tag>.tsv`；合并后是 `fused.tar`（Perfetto 合并归档） |
+| 产物 | `hw_<tag>.perfetto`（带线程切换日志的 `Threads` 轨道） | 再加 `notes_<tag>.bin`；合并后是 `fused.tar`（Perfetto 合并归档） |
 
 两种都可以用命令行跑，也可以用 **网页点击模式**（`cortrace serve`）：在 ui.perfetto.dev 的 Record 页面点
 Start，抓取、解码、显示一气呵成（见第 5 节；网页模式只显示硬件 trace）。
@@ -43,7 +43,7 @@ flowchart LR
         GRAB["cortrace-grab<br/>raw_TAG.bin"]
         DEC["cortrace-decode<br/>deframe + OpenCSD + 调用栈"]
         HW["hw_TAG.perfetto<br/>(硬件 trace)"]
-        NOTES["notes_TAG.bin<br/>hwruns_TAG.tsv<br/>(--notes)"]
+        NOTES["notes_TAG.bin<br/>(--notes)"]
     end
     subgraph N["pynuttx 的 nxtrace"]
         NX["nxtrace merge<br/>解析 note + 拟合时钟偏移 + 合并"]
@@ -258,9 +258,10 @@ cortrace capture --notes --itm-port 1 --elf nuttx --secs 1 --width 4 --tag demo 
 
 - `--itm-port N`：固件把 note 写到哪个端口。上游驱动默认 1（`ARMV7M_NOTE_ITM_PORT`），Vela 的 coresight
   驱动是 0。
-- `--notes` 会改用 hybrid 时间基（需要 `--tsgen-hz`，默认 75 MHz，即 HCLK），并多写两个文件：
-  `notes_<tag>.bin`（ITM 端口上的原始 note 字节流，note 里 32 位的 DWT 周期计数已经扩成 64 位）和
-  `hwruns_<tag>.tsv`（硬件侧的线程切换日志，每次切入一行 `<ns>\t<名字> (pid N)`，和 `hw_<tag>.perfetto` 同一个时钟）。
+- `--notes` 会改用 hybrid 时间基（需要 `--tsgen-hz`，默认 75 MHz，即 HCLK），并多写一个文件：
+  `notes_<tag>.bin`（ITM 端口上的原始 note 字节流，note 里 32 位的 DWT 周期计数已经扩成 64 位）。
+  硬件侧的线程切换日志不用另写：`hw_<tag>.perfetto` 的 `Threads` 轨道就是，每次运行一个 slice，名字是
+  `<名字> (pid N)`，和 trace 同一个时钟；写在文件最前面，`nxtrace merge` 只读文件头。
 - 抓不到 note 字节时只打一条警告，硬件 trace 照常写出。
 - `cortrace tcbmap` 默认按上游的 TCB 布局读 pid 和入口，布局不同时用 `--pid-off`、`--entry-off`（偏移可以用 gdb 的
   `print &((struct tcb_s *)0)->pid` 得到）。
@@ -270,8 +271,7 @@ cortrace capture --notes --itm-port 1 --elf nuttx --secs 1 --width 4 --tag demo 
 
 ```sh
 python -m nxtrace merge -o fused.tar \
-    --hw hw_demo.perfetto --hw-switches hwruns_demo.tsv \
-    --notes notes_demo.bin --elf nuttx --freq 150000000 --pid-names tcbmap.txt
+    --hw hw_demo.perfetto --notes notes_demo.bin --elf nuttx --freq 150000000
 ```
 
 （在 pynuttx 目录里运行，或者设好 `PYTHONPATH`；`--freq` 是给 note 打时间戳的计数器频率，也就是 CPU 时钟。）
@@ -490,7 +490,7 @@ cortrace capture --elf fw.elf --secs 1 --probe-telnet 127.0.0.1:4444           #
 cortrace capture --notes --itm-port 1 --elf nuttx --secs 1 --tag t --probe-telnet 127.0.0.1:4444   # 另外写出 note 字节流和线程切换日志
 cortrace serve --elf nuttx --tcbmap m.txt                      # 网页点击（浏览器里点 Start）
 cortrace tcbmap --elf nuttx --telnet 127.0.0.1:4444 --out m.txt  # 线程名映射
-python -m nxtrace merge -o fused.tar --hw hw_t.perfetto --hw-switches hwruns_t.tsv \
-    --notes notes_t.bin --elf nuttx --freq 150000000 --pid-names m.txt   # 和 NuttX note 合并（pynuttx）
+python -m nxtrace merge -o fused.tar --hw hw_t.perfetto \
+    --notes notes_t.bin --elf nuttx --freq 150000000                     # 和 NuttX note 合并（pynuttx）
 cortrace --help                                                # 全部命令
 ```

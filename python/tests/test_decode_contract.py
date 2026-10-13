@@ -61,7 +61,7 @@ def test_capture_notes_flags_exist(help_text, tmp_path):
     cmd = capture_command(tmp_path, "cycle", "--notes")
     missing = [f for f in sorted(flags(cmd)) if f not in help_text]
     assert not missing, f"cortrace-decode no longer has: {missing}"
-    for flag in ("--itm-note-out", "--runs-out", "--itm-note-unwrap"):
+    for flag in ("--itm-note-out", "--itm-note-unwrap"):
         assert flag in cmd
 
 
