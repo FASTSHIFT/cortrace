@@ -944,7 +944,11 @@ int main(int argc, char** argv)
                     std::fprintf(stderr, "wrote thread runs -> %s\n", runs_out->c_str());
                 }
             }
-            timed.insert(timed.end(), nx_timed.begin(), nx_timed.end());
+            // The Threads track goes first in the file: it is the thread switch
+            // log of this trace (`<ns> <name> (pid N)` per run), and a reader
+            // that wants only that can stop after the first packets instead of
+            // scanning millions of call-stack events (nxtrace merge does).
+            timed.insert(timed.begin(), nx_timed.begin(), nx_timed.end());
             for (const auto& kv : nx_tracks)
                 tracks[kv.first] = kv.second;
         }
