@@ -1,0 +1,170 @@
+# NXP S32K344 (Cortex-M7_0, lockstep with M7_1): 4-bit parallel trace on the
+# fast pads PTC2 (TRACE_ETM_CLKOUT), PTD7, PTD12, PTD11, PTD10 (TRACE_ETM_D0..D3).
+#
+# DRAFT: written from the S32K3xx Reference Manual (Rev. 12, 2025-11-11) and its
+# attached S32K344 IOMUX workbook; NOT yet run on a board. "RM p." is the page
+# printed on the page. The things only a board can settle are marked UNVERIFIED.
+# UNVERIFIED: the phase between TRACE_ETM_CLKOUT and the data. The datasheet only
+# guarantees a 1.2 ns valid window around each clock edge (0.3 ns after it, Fig. 70),
+# not a data change half a bit away from the edge, which the capture front end needs.
+# Look at the pins first (docs/06-s32k3xx.md, section 7).
+# The same blocks, pins and clock options apply to the S32K324 and S32K314 (one
+# IOMUX workbook, Table 829, Table 157); on the S32K324 the second core's funnel
+# ports are 0xC. The whole series is compared in docs/06-s32k3xx.md.
+#
+# What the manual says, and where:
+#  - The manual says "ETM is supported in S32K344 only" (p.5324) and that the
+#    fast trace pad TRACE_D[15:0] "is available only in S32K344" (p.5323).
+#  - The path is  ETM + ITM -> funnel 0 -> cluster ETF -> funnel 2 -> shared ETF
+#    -> TPIU  (RM Fig. 562 p.5315, Table 832 p.5316-5317); funnel 2 port 0 is the
+#    "Cortex-M7 instruction ETF". Funnels 1 (data trace) and port 1-2 of funnel 2
+#    stay off.
+#  - CoreSight block addresses: Table 829 (p.5309-5311) for the chip blocks,
+#    Table 9 (p.36) for the core's own ITM/DWT/ETM.
+#  - Debugger access points (Table 826, p.5302-5303): AHB-AP 4 is Cortex-M7_0,
+#    APB-AP 1 is the debug APB, MDM-AP 6 is MDM_AP.
+#  - ETM instruction trace of one core needs 27.6 MB/s (Table 835, p.5318).
+name = "s32k344"
+description = "NXP S32K344, parallel trace on PTC2, PTD7, PTD12, PTD11, PTD10"
+core = "cortex-m7"
+
+[coresight]
+etm = 0xE0041000    # Cortex-M7_0 PPB (Table 9)
+dwt = 0xE0001000
+itm = 0xE0000000
+tpiu = 0x4024A000   # Table 829
+tsgen = 0x4024C000  # "Timestamp CTL"
+
+# Programmed in this order, sink side first.
+[[coresight.path]]
+kind = "etf"        # Shared_system_ETF, 2 KB, in front of the TPIU
+base = 0x40247000
+[[coresight.path]]
+kind = "funnel"     # Funnel 2: only port 0, the cluster ETF through the async bridge
+base = 0x40243000
+ports = 0x1
+itm_priority = false
+[[coresight.path]]
+kind = "etf"        # CM7_cluster_ETF_ETMI, 1 KB
+base = 0x40244000
+[[coresight.path]]
+kind = "funnel"     # Funnel 0: port 0 = Cortex-M7_0 ETMI, port 1 = Cortex-M7_0 ITM
+base = 0x40241000
+
+[trace]
+etm_trace_id = 2
+itm_trace_id = 1
+max_width = 4       # four fast data pads; the 16 wide port is on the 257 BGA's slow pads
+
+[clocks]
+# Both from Table 157 (p.981-982) and 82.4 "Timestamps" (p.5301): CORE_CLK is
+# 160 MHz in the 160 MHz option, and the timestamp generator runs at the funnel
+# input frequency of Table 832, 160 MHz for the S32K344.
+tsgen_hz = 160000000
+sysclk_hz = 160000000
+
+# --- trace clock -----------------------------------------------------------
+# MC_CGM mux 11 (base 0x402D8000) feeds TRACE_CLK; it is a software-controlled
+# mux, switched with the flow of RM Fig. 124 (p.1011): gate, wait until gated,
+# select, ungate, wait until running. Source PLL_PHI1_CLK (SELCTL 1001b, p.1099)
+# must already run: the board's clock setup has to enable it (NuttX's
+# s32k344evb does, at 160 MHz). Divider: period = (DIV+1) x input (p.1101).
+# Table 157 gives DIV 0001b for TRACE_CLK on fast pads: 80 MHz from a 160 MHz
+# PLL_PHI1 (120 MHz from 240 MHz).
+# UNVERIFIED: whether the pin clock equals the TRACE_CLK value of Table 157 or
+# half of it (Fig. 67 shows a /2 after the divider). Measure TRACECLK at the FPGA
+# (`cortrace fpga health`); the capture path was clean up to about 75 MHz.
+# DIV 0001b is the manual's setting; use 0010b (53 MHz) if 80 MHz is too fast
+# for the wiring. At least 27.6 MHz is needed for one core's instruction trace.
+[[on_trace_start]]
+comment = "MC_CGM MUX_11_CSC.CG: gate TRACE_CLK"
+op = "rmw32"
+addr = 0x402D85C0
+set = 0x4
+[[on_trace_start]]
+comment = "MUX_11_CSS.CS == 0: gated"
+op = "poll32"
+addr = 0x402D85C4
+mask = 0x20000
+value = 0
+tries = 100
+required = true
+[[on_trace_start]]
+comment = "MUX_11_CSC.SELCTL = PLL_PHI1_CLK"
+op = "rmw32"
+addr = 0x402D85C0
+clear = 0x0F000000
+set = 0x09000000
+[[on_trace_start]]
+comment = "MUX_11_DC_0: divider on, DIV = 1 (one atomic write)"
+op = "write32"
+addr = 0x402D85C8
+value = 0x80010000
+[[on_trace_start]]
+comment = "MUX_11_DIV_UPD_STAT.DIV_STAT == 0: divider took it"
+op = "poll32"
+addr = 0x402D85FC
+mask = 0x1
+value = 0
+tries = 100
+required = true
+[[on_trace_start]]
+comment = "MUX_11_CSC.CG: ungate TRACE_CLK"
+op = "rmw32"
+addr = 0x402D85C0
+clear = 0x4
+[[on_trace_start]]
+comment = "MUX_11_CSS.CS == 1: TRACE_CLK running"
+op = "poll32"
+addr = 0x402D85C4
+mask = 0x20000
+tries = 100
+required = true
+
+# --- pads ------------------------------------------------------------------
+# SIUL2 base 0x40290000, MSCRn at 0x240 + 4n (RM p.307). The pads are GPIO-FAST
+# on VDD_HV_B (IOMUX workbook, "IO Signal Table"): the output levels follow
+# VDD_HV_B, 3.3 V or 5 V. The FPGA input is 3.3 V: VDD_HV_B must be 3.3 V.
+# MSCR bits (p.425-427): SSS[2:0] = pin function, OBE = bit 21, DSE = bit 8,
+# SRC = bit 14 (0 = fastest; the reset value of these five is 1, slowest).
+# The datasheet measures the trace timing with DSE = 1 and SRC = 0.
+# Functions (IOMUX workbook "S32K344_Pinout", the same on 100 LQFP, 172 HDQFP
+# and 257 BGA): CLKOUT and D0 are ALT6, D1 to D3 are ALT4.
+[[on_trace_start]]
+comment = "MSCR66  PTC2  = TRACE_ETM_CLKOUT (ALT6, OBE, DSE)"
+op = "write32"
+addr = 0x40290348
+value = 0x00200106
+[[on_trace_start]]
+comment = "MSCR103 PTD7  = TRACE_ETM_D0 (ALT6, OBE, DSE)"
+op = "write32"
+addr = 0x402903DC
+value = 0x00200106
+[[on_trace_start]]
+comment = "MSCR108 PTD12 = TRACE_ETM_D1 (ALT4, OBE, DSE)"
+op = "write32"
+addr = 0x402903F0
+value = 0x00200104
+[[on_trace_start]]
+comment = "MSCR107 PTD11 = TRACE_ETM_D2 (ALT4, OBE, DSE)"
+op = "write32"
+addr = 0x402903EC
+value = 0x00200104
+[[on_trace_start]]
+comment = "MSCR106 PTD10 = TRACE_ETM_D3 (ALT4, OBE, DSE)"
+op = "write32"
+addr = 0x402903E8
+value = 0x00200104
+
+# MDM_AP MDMAPCTL (0x4025_0600 + 4, RM p.5329-5332): bit 13 DBGRSTFASTPAD "enables
+# trace via fast pads" and keeps the trace pads (mux and output enable) through a
+# functional reset; it does not set up the clock. Reset value 0x06400000, so
+# read-modify-write.
+# UNVERIFIED: that the core can reach MDM_AP at this address (Table 826 lists it as
+# the address "access from cores"). If the probe faults here, drop this step and
+# write the register through the debug port instead (OpenOCD: `dap apreg 6 4 ...`).
+[[on_trace_start]]
+comment = "MDMAPCTL.DBGRSTFASTPAD: trace on the fast pads"
+op = "rmw32"
+addr = 0x40250604
+set = 0x2000

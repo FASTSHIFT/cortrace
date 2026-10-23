@@ -68,10 +68,10 @@ flowchart TD
 
 `platforms/<名字>.toml`，由 `cortrace/platdesc.py` 加载，`cortrace/trace_arm.py` 执行。查找顺序：`$CORTRACE_PLATFORM_PATH`、`~/.config/cortrace/platforms`、`/usr/share/cortrace/platforms`、源码树的 `platforms/`。
 
-- `[coresight]`：ETM、DWT、ITM、CSTF、ETF、TPIU、TSGEN 的基地址（全部必填）。
+- `[coresight]`：ETM、DWT、ITM、TPIU、TSGEN 的基地址（必填）。ETM/ITM 到 TPIU 之间的漏斗和 ETF 有两种写法：一个漏斗加一个 ETF 写成 `cstf`、`etf`；更多级用 `[[coresight.path]]`，每项 `kind`（`funnel` 或 `etf`）和 `base`，漏斗可再给 `ports`（要打开的输入端口掩码，默认 0x3）和 `itm_priority`（默认 true）。按列出的顺序编程，建议从靠近 TPIU 的一端写起。S32K3xx 有两级漏斗和两个 ETF，见 [06-s32k3xx.md](06-s32k3xx.md)。
 - `[trace]`：ETM 与 ITM/DWT 的 trace id、最大端口宽度。
 - `[clocks]`：板级默认时钟，目前只是记录。
-- `[[on_trace_start]]`：芯片专有步骤，三种操作：`write32`、`rmw32`（`set`/`clear`）、`poll32`（`mask`、`tries`，默认超时只打印提示并继续，`required = true` 才报错）。
+- `[[on_trace_start]]`：芯片专有步骤，三种操作：`write32`、`rmw32`（`set`/`clear`）、`poll32`（`mask`、`tries`，默认超时只打印提示并继续，`required = true` 才报错；给 `value` 时等 `(寄存器 & mask) == value`，不给则等 `mask` 里任一位置位）。
 
 所有 Armv7-M 通用的部分（解锁、TPIU/漏斗/ETF/ETM/ITM/DWT 的编程顺序）写在 `trace_arm.py` 里，不放进平台文件。`stm32h743.toml` 是 `nxtrace_dap.cfg` 里芯片专有那部分的直译：SYSCFG 补偿单元、GPIOE 复用、`DBGMCU_CR`。
 
