@@ -92,6 +92,16 @@ def test_etm_is_programmed_and_enabled_with_the_platform_id(plat):
     assert order(probe, 0xE0041010) == [0x810]
 
 
+def test_comparators_that_are_not_used_are_switched_off(plat):
+    """A comparator armed by an earlier session must not keep emitting."""
+    probe = FakeProbe({0xE0001038: 0xD, 0xE0001048: 0xD})
+    trace_arm.arm(probe, plat, [Watch("g_x", 4)], log=lambda _m: None)
+    assert probe.regs[0xE0001028] == 0xD  # COMP0 is the watched variable
+    assert probe.regs[0xE0001038] == 0
+    assert probe.regs[0xE0001048] == 0
+    assert probe.regs[0xE0001058] == 0
+
+
 def test_no_etm_holds_it_disabled(plat):
     probe = FakeProbe()
     trace_arm.arm(probe, plat, [Watch("g_x", 4)], etm=False, log=lambda _m: None)

@@ -39,7 +39,8 @@ def build_parser():
     ap.add_argument(
         "--os",
         default="auto",
-        help="OS plugin name, 'auto' or 'none' (default: auto)",
+        help="OS plugin name, 'auto' or 'none': no OS (bare metal), nothing is "
+        "watched and only the ETM and ITM are armed (default: auto)",
     )
     ap.add_argument(
         "--watch-addr",
@@ -59,6 +60,11 @@ def build_parser():
 def _watches(args):
     if args.watch_addr:
         return [Watch(f"0x{a:08x}", a) for a in args.watch_addr]
+    if args.os == "none":
+        # Bare metal: no current-task variable, so no DWT comparator. The ETM
+        # and ITM are armed as usual.
+        log("OS: none, no variable watched")
+        return []
     if not args.elf:
         raise osplugins.PluginError("pass --elf or --watch-addr")
     elf = ElfInfo(args.elf)

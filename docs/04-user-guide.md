@@ -326,7 +326,7 @@ features: DDR3 ring, stream self-test, run-time port width
 | `cortrace fpga ctrl set-width 4` | 设置 FPGA 的 TPIU 位宽并重新武装；还有 `rearm`、`set-bitlen`、`stream-selftest`、`iddr-prbs` |
 | `cortrace fpga health [ip] [--check {health,ddr3,blackbox}] [--reset]` | 读 FPGA 的调试寄存器并给出诊断 |
 | `cortrace fpga net` | ARP 探测 FPGA 接在哪个网口（需要 `CAP_NET_RAW`） |
-| `cortrace arm --platform P --elf fw.elf --probe-telnet HOST:PORT` | 通过常驻 OpenOCD 给目标布防 ETM/ITM/DWT；`--list` 列出平台，`--no-etm` 只布防 ITM/DWT，`--width` 设 TPIU 位宽 |
+| `cortrace arm --platform P --elf fw.elf --probe-telnet HOST:PORT` | 通过常驻 OpenOCD 给目标布防 ETM/ITM/DWT；`--list` 列出平台，`--os none` 裸机（不监视变量），`--no-etm` 只布防 ITM/DWT，`--width` 设 TPIU 位宽 |
 | `cortrace os list` / `os watch --elf fw.elf` / `os resolve …` | 列出 OS 插件 / 打印 DWT 要监视的变量与地址 / 把指针值解析成线程映射 |
 
 **布防**：先起一个不带任何 trace 配置的 OpenOCD，让它常驻（它持有 `C_DEBUGEN`），然后：
@@ -336,8 +336,11 @@ openocd -f interface/cmsis-dap.cfg -f target/stm32h7x.cfg &      # 常驻，teln
 cortrace arm --platform stm32h743 --elf fw.elf --probe-telnet 127.0.0.1:4444
 ```
 
-要监视哪个变量由 ELF 里的 OS 插件决定（NuttX 的 `g_running_tasks`、FreeRTOS 的 `pxCurrentTCB`），没有 OS 时用
-`--watch-addr ADDR`。芯片相关的部分（CoreSight 组件地址、管脚复用、`DBGMCU_CR`）在 `platforms/<名字>.toml` 里；
+要监视哪个变量由 ELF 里的 OS 插件决定（NuttX 的 `g_running_tasks`、FreeRTOS 的 `pxCurrentTCB`）。裸机程序没有
+这样的变量：用 `--os none`，这时不监视任何变量，只布防 ETM 和 ITM，并把上一次会话留在 DWT 比较器里的配置关掉，
+`--elf` 也可以不给。`--watch-addr ADDR` 监视任意地址，**写入的值会被当成当前任务指针**，在 Threads 轨道上显示成
+`tcb@0x…`，所以别拿计数器之类的变量凑数。ELF 里认不出 OS 又没给 `--os none` 时是错误，免得悄悄丢掉线程视图。
+芯片相关的部分（CoreSight 组件地址、管脚复用、`DBGMCU_CR`）在 `platforms/<名字>.toml` 里；
 新芯片复制一份改地址即可，放到 `~/.config/cortrace/platforms/` 或 `$CORTRACE_PLATFORM_PATH` 就能被找到。
 这等价于 cortrace-fpga 里的 `nxtrace_dap.cfg`，那一份仍然可用。
 

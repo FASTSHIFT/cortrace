@@ -158,6 +158,10 @@ def arm_dwt(regs, base, watches):
         regs.write(comp + 0x0, watch.addr)
         regs.write(comp + 0x4, 0)  # MASK: exact address
         regs.write(comp + 0x8, DWT_FUNC_DATA_VALUE_WRITE)
+    # A system reset does not reset the debug domain: a comparator left armed
+    # by an earlier session would keep emitting data-value packets.
+    for i in range(len(watches), MAX_COMPARATORS):
+        regs.write(base + 0x020 + DWT_COMP_STRIDE * i + 0x8, 0)
 
 
 def arm(probe, platform, watches, *, width=4, etm=True, log=print):

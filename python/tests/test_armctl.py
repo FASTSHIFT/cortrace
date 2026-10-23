@@ -50,6 +50,28 @@ def test_explicit_addresses_need_no_elf(probe):
     assert probe.regs[0x5C015004] == 0x2
 
 
+def test_os_none_arms_without_watching_a_variable(probe, capsys):
+    """Bare metal: no ELF needed, no comparator armed, the ETM still on."""
+    assert armctl.main(base_args("--os", "none")) == 0
+    assert "OS: none, no variable watched" in capsys.readouterr().err
+    for comp in range(4):
+        assert probe.regs[0xE0001028 + 0x10 * comp] == 0
+    assert (0xE0001028, 0xD) not in probe.writes
+    assert (0xE0041004, 1) in probe.writes  # ETM on
+    assert probe.events == ["halt", "resume"]
+
+
+def test_os_none_clears_a_comparator_left_by_an_earlier_session(probe):
+    probe.regs[0xE0001028] = 0xD  # COMP0 FUNCTION armed before
+    assert armctl.main(base_args("--os", "none")) == 0
+    assert probe.regs[0xE0001028] == 0
+
+
+def test_a_watched_address_wins_over_os_none(probe):
+    assert armctl.main(base_args("--os", "none", "--watch-addr", "0x24000600")) == 0
+    assert probe.regs[0xE0001020] == 0x24000600
+
+
 def test_no_etm_flag_keeps_the_etm_off(probe):
     assert armctl.main(base_args("--watch-addr", "4", "--no-etm")) == 0
     assert (0xE0041010, 0x810) not in probe.writes
@@ -83,7 +105,6 @@ def test_an_elf_without_a_matching_os_is_an_error(tmp_path, capsys):
     bare = build(tmp_path, "bare", "void main(void) {}", "-g")
     assert armctl.main(base_args("--elf", bare)) == 1
     assert "no OS plugin matches" in capsys.readouterr().err
-    assert armctl.main(base_args("--elf", bare, "--os", "none")) == 1
     nuttx = build(tmp_path, "nuttx", NUTTX_C, "-g")
     assert armctl.main(base_args("--elf", nuttx, "--os", "freertos")) == 1
     assert "neither pxCurrentTCB nor pxCurrentTCBs" in capsys.readouterr().err
