@@ -111,6 +111,16 @@ private:
     struct Context {
         int track; // Perfetto track id for this context
         std::vector<Frame> stack; // call frames on this track
+        // A call whose callee had not started yet when an exception preempted
+        // this context (the BL ran, the exception came before the callee's
+        // first instruction). The exception return resumes at the callee's
+        // entry, so the call is still to be confirmed then.
+        bool pending_call = false;
+        uint32_t pending_ret = 0;
+        // The last instruction range this context ran (what was reported as
+        // executed before an exception took over).
+        uint32_t last_start = 0;
+        uint32_t last_end = 0;
     };
 
     void do_call(const std::string& callee, uint32_t ret);
@@ -142,6 +152,15 @@ private:
     bool pending_call_ = false;
     uint32_t pending_ret_ = 0;
     bool after_blind_ = false;
+    // Set by an exception return: the first range that follows may re-run the
+    // branch that the exception interrupted (see process()).
+    bool check_reexec_ = false;
+    uint32_t reexec_start_ = 0;
+    uint32_t reexec_end_ = 0;
+    // The return that was just popped promised to resume at this address.
+    bool have_expect_ = false;
+    uint32_t expect_ret_ = 0;
+    std::string expect_from_;
 };
 
 // Map an ARM Cortex-M exception number to a readable ISR name.

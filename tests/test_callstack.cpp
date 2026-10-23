@@ -472,3 +472,120 @@ TEST(callstack_switching_to_the_running_thread_changes_nothing)
     CHECK_EQ(m.metrics().ends, 1L);
     CHECK_EQ(m.metrics().mismatched_returns, 0L);
 }
+
+// ---- an exception that lands next to a call or a return ------------------
+
+// main (0x1000), leaf (0x2000), other (0x3000), the SysTick handler (0x4000).
+static SymbolTable make_isr_syms()
+{
+    SymbolTable t;
+    t.add(0x1000, "main");
+    t.add(0x2000, "leaf");
+    t.add(0x3000, "other");
+    t.add(0x4000, "SysTick_Handler");
+    t.finalize();
+    return t;
+}
+
+static std::vector<std::string> names_of(const CallStackMachine& m, bool begin)
+{
+    std::vector<std::string> out;
+    for (auto& s : m.slices())
+        if (s.begin == begin)
+            out.push_back(s.name);
+    return out;
+}
+
+TEST(callstack_an_exception_between_a_call_and_its_callee_keeps_the_call)
+{
+    // BL leaf has run, the exception comes before leaf's first instruction,
+    // and the exception return resumes at leaf's entry. The call must still
+    // be made, or leaf's return pops the frame of its caller.
+    SymbolTable syms = make_isr_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    m.process(Element::instr_range(0x1004, 0x1008, BranchKind::DirectCall, true));
+    m.process(Element::exception(15));
+    m.process(Element::instr_range(0x4000, 0x4008, BranchKind::Return, true));
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::None, false));
+    m.process(Element::instr_range(0x2010, 0x2014, BranchKind::Return, true));
+    m.process(Element::instr_range(0x1008, 0x100c, BranchKind::None, false));
+    m.finish();
+    CHECK_EQ(m.metrics().dropped_calls, 0L);
+    CHECK_EQ(m.metrics().mismatched_returns, 0L);
+    bool edge = false;
+    for (auto& kv : m.edges())
+        if (kv.first == "<root> -> leaf" || kv.first == "main -> leaf")
+            edge = kv.second == 1;
+    CHECK(edge);
+    CHECK(m.metrics().balanced());
+}
+
+TEST(callstack_a_return_run_again_after_an_exception_pops_once)
+{
+    // The exception takes over on the POP {pc} that ends other(). The range
+    // before it already counts the POP as executed; after the exception return
+    // the same POP runs again as a one-instruction range. leaf must stay on
+    // the stack until its own return.
+    SymbolTable syms = make_isr_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    m.process(Element::instr_range(0x1004, 0x1008, BranchKind::DirectCall, true)); // main -> leaf
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::DirectCall, true)); // leaf -> other
+    m.process(
+        Element::instr_range(0x3000, 0x3010, BranchKind::Return, true)); // other: POP at 0x300e
+    m.process(Element::exception(15));
+    m.process(Element::instr_range(0x4000, 0x4008, BranchKind::Return, true));
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    m.process(Element::instr_range(0x300e, 0x3010, BranchKind::Return, true)); // the POP again
+    m.process(Element::instr_range(0x2010, 0x2018, BranchKind::Return, true)); // leaf returns
+    m.process(Element::instr_range(0x1008, 0x100c, BranchKind::None, false));
+    CHECK_EQ(m.metrics().mismatched_returns, 0L);
+    CHECK_EQ(m.metrics().recovered_missed_returns, 0L);
+    m.finish();
+    CHECK(m.metrics().balanced());
+    // each frame ends under its own name, other before leaf
+    const std::vector<std::string> ends = names_of(m, false);
+    CHECK_EQ(ends.size(), static_cast<std::size_t>(3));
+    CHECK_EQ(ends[0], std::string("other"));
+    CHECK_EQ(ends[1], std::string("IRQ:SysTick"));
+    CHECK_EQ(ends[2], std::string("leaf"));
+}
+
+TEST(callstack_the_exit_of_an_exception_handler_is_not_a_mismatched_return)
+{
+    SymbolTable syms = make_isr_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    m.process(Element::exception(15));
+    m.process(Element::instr_range(0x4000, 0x4008, BranchKind::Return, true)); // BX LR (EXC_RETURN)
+    m.process(Element::simple(ElementKind::ExceptionRet));
+    m.finish();
+    CHECK_EQ(m.metrics().mismatched_returns, 0L);
+    CHECK(m.metrics().balanced());
+}
+
+TEST(callstack_a_tail_call_into_a_function_on_the_stack_does_not_unwind)
+{
+    // leaf calls other(), other() ends with `b leaf` (a callback that jumps back
+    // into its ancestor). leaf is on the stack twice from then on; the frames
+    // between are not lost returns and nothing may be unwound.
+    SymbolTable syms = make_isr_syms();
+    CallStackMachine m(syms);
+    m.process(Element::instr_range(0x1000, 0x1008, BranchKind::None, false));
+    m.process(Element::instr_range(0x1004, 0x1008, BranchKind::DirectCall, true)); // main -> leaf
+    m.process(Element::instr_range(0x2000, 0x2010, BranchKind::DirectCall, true)); // leaf -> other
+    m.process(Element::instr_range(0x3000, 0x3008, BranchKind::Direct, true)); // other: b leaf
+    m.process(Element::instr_range(0x2000, 0x2008, BranchKind::None, false)); // leaf, entry
+    m.process(Element::instr_range(0x2008, 0x2014, BranchKind::Return, true)); // leaf, mid
+    CHECK_EQ(m.metrics().recovered_missed_returns, 0L);
+    CHECK_EQ(m.metrics().ends, 1L); // only the jumped-to frame has ended
+    m.process(Element::instr_range(0x2010, 0x2018, BranchKind::Return, true)); // back in leaf
+    m.process(Element::instr_range(0x1008, 0x100c, BranchKind::None, false));
+    CHECK_EQ(m.metrics().ends, 2L);
+    CHECK_EQ(m.metrics().mismatched_returns, 0L);
+    CHECK_EQ(m.metrics().recovered_missed_returns, 0L);
+    m.finish();
+    CHECK(m.metrics().balanced());
+}

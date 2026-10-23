@@ -136,8 +136,16 @@ void CallStackMachine::do_return()
 {
     auto& stack = cur().stack;
     if (stack.size() > 1) {
+        have_expect_ = stack.back().ret_addr != 0;
+        expect_ret_ = stack.back().ret_addr;
+        expect_from_ = stack.back().fn;
         emit(false, stack.back().fn);
         stack.pop_back();
+    } else if (ctx_.size() > 1) {
+        // The ISR's own exit (BX LR with EXC_RETURN, POP {..., pc}) is a return
+        // too; its frame is the context root and is closed by the exception
+        // return element, so there is nothing to pop and nothing is wrong.
+        have_expect_ = false;
     } else {
         // Per-occurrence diagnostic: on a lossy/desynced stream these fire by
         // the thousand, so keep them at DEBUG (silent by default). The total is
@@ -177,6 +185,32 @@ void CallStackMachine::process(const Element& e)
         const uint32_t end = e.end_addr;
         auto& stack = cur().stack;
 
+        if (have_expect_ && !after_blind_ && start != expect_ret_) {
+            CT_LOG_DEBUG("return from %s should resume at 0x%x but resumed at 0x%x in %s "
+                         "(byte %llu), top now %s",
+                expect_from_.c_str(), expect_ret_, start, syms_.function_at(start).c_str(),
+                static_cast<unsigned long long>(last_byte_index_), stack.back().fn.c_str());
+        }
+        have_expect_ = false;
+
+        // An exception can take over on the branch that ends the last range it
+        // saw (a POP {..., pc} or BX LR). That instruction is then run again
+        // after the exception return, so the same branch shows up in two
+        // ranges: the one before the exception and a one-instruction range
+        // after it. The first one already acted on the stack; the second must
+        // not pop (or push) a second time, or every frame below shifts by one.
+        bool reexec = false;
+        if (check_reexec_) {
+            check_reexec_ = false;
+            reexec = (e.is_call() || e.is_return()) && end == reexec_end_ && start >= reexec_start_
+                && start < reexec_end_;
+            if (reexec) {
+                CT_LOG_DEBUG("branch at 0x%x run again after an exception return (byte %llu)",
+                    start, static_cast<unsigned long long>(last_byte_index_));
+                pending_call_ = false;
+            }
+        }
+
         // Resolve a pending CALL from the previous range. Confirm only if this
         // range starts exactly at a function entry; otherwise the callee body
         // was swallowed by a blind spot and OpenCSD resynced elsewhere — do not
@@ -197,7 +231,7 @@ void CallStackMachine::process(const Element& e)
         // Reconcile the current track's stack with where we actually are
         // (unless we just confirmed a fresh call above, in which case top ==
         // callee already).
-        if (!stack.empty()) {
+        if (!reexec && !stack.empty()) {
             const std::string& fn = syms_.function_at(start);
             if (stack.back().fn != fn) {
                 // If `fn` matches a frame BELOW the top, the frames above it
@@ -211,7 +245,14 @@ void CallStackMachine::process(const Element& e)
                         break;
                     }
                 }
-                if (found >= 0) {
+                // A return lands in the middle of its caller, never on the
+                // caller's first instruction. A range that starts exactly at a
+                // function's entry without a call is a tail call (`b fn`),
+                // also into a function that is already on the stack (a
+                // callback that ends by jumping back into its ancestor):
+                // that is not a sign that the frames above were lost.
+                const bool at_entry = syms_.is_function_entry(start);
+                if (found >= 0 && !at_entry) {
                     while (static_cast<int>(stack.size()) - 1 > found) {
                         CT_LOG_DEBUG("unwinding stale frame %s to reach %s (byte %llu)",
                             stack.back().fn.c_str(), fn.c_str(),
@@ -220,7 +261,10 @@ void CallStackMachine::process(const Element& e)
                         stack.pop_back();
                         metrics_.recovered_missed_returns++;
                     }
-                } else if (!syms_.is_function_entry(start)) {
+                } else if (found >= 0) {
+                    // tail call into a function that is already on the stack
+                    relabel_top(fn);
+                } else if (!at_entry) {
                     // mid-function fallthrough into another symbol's tail region
                     relabel_top(fn);
                 }
@@ -232,9 +276,11 @@ void CallStackMachine::process(const Element& e)
         if (e.is_call()) {
             pending_call_ = true;
             pending_ret_ = end;
-        } else if (e.is_return()) {
+        } else if (e.is_return() && !reexec) {
             do_return();
         }
+        cur().last_start = start;
+        cur().last_end = end;
         break;
     }
 
@@ -242,7 +288,14 @@ void CallStackMachine::process(const Element& e)
         // Preempt the current context: open a NEW context on this exception's
         // own track (one track per exception number). The ISR's functions land
         // on that track, not nested on the preempted function.
+        // A call that has just been made but whose callee has not run yet is
+        // not lost: the exception return resumes at the callee's entry. Park it
+        // with the preempted context instead of dropping it, or the callee's
+        // return would pop its caller and shift every frame below it.
+        cur().pending_call = pending_call_;
+        cur().pending_ret = pending_ret_;
         pending_call_ = false;
+        have_expect_ = false;
         const std::string nm = exception_name(e.exception_number);
         const int track = track_for_exception(e.exception_number);
         metrics_.exceptions++;
@@ -263,9 +316,19 @@ void CallStackMachine::process(const Element& e)
                 stack.pop_back();
             }
             ctx_.pop_back();
+            // Resume the preempted context: a call it had announced is still
+            // waiting for its callee's first range.
+            pending_call_ = cur().pending_call;
+            pending_ret_ = cur().pending_ret;
+            cur().pending_call = false;
+            check_reexec_ = true;
+            reexec_start_ = cur().last_start;
+            reexec_end_ = cur().last_end;
+        } else {
+            pending_call_ = false;
         }
-        pending_call_ = false;
-        after_blind_ = true;
+        have_expect_ = false;
+        after_blind_ = !pending_call_;
         break;
     }
 
@@ -274,6 +337,8 @@ void CallStackMachine::process(const Element& e)
         // Discontinuity: any call/return straddling the gap is lost. Never
         // fabricate flow across it. A call left pending here loses its callee.
         ++gaps_;
+        check_reexec_ = false;
+        have_expect_ = false;
         if (pending_call_) {
             pending_call_ = false;
             CT_LOG_DEBUG("dropped call at byte %llu: pending call straddled a %s discontinuity",
