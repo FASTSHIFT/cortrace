@@ -64,9 +64,68 @@ def test_unreadable_and_malformed_files(tmp_path):
 
 
 def test_every_block_must_have_an_address(tmp_path):
-    with pytest.raises(platdesc.PlatformError, match=r"lacks etf, tpiu"):
+    with pytest.raises(platdesc.PlatformError, match=r"lacks tpiu, etf"):
         platdesc.load(
             write(tmp_path, MINIMAL.replace("etf = 0x5000\ntpiu = 0x6000\n", ""))
+        )
+
+
+def test_one_funnel_and_one_etf_make_the_default_path(tmp_path):
+    path = platdesc.load(write(tmp_path, MINIMAL))["coresight"]["path"]
+    assert path == [
+        {"kind": "funnel", "base": 0x4000, "ports": 0x3, "itm_priority": True},
+        {"kind": "etf", "base": 0x5000},
+    ]
+
+
+PATHS = """
+[[coresight.path]]
+kind = "etf"
+base = 0x5000
+[[coresight.path]]
+kind = "funnel"
+base = 0x4000
+ports = 0x1
+itm_priority = false
+[[coresight.path]]
+kind = "funnel"
+base = 0x4800
+"""
+NO_CHAIN = "".join(
+    line
+    for line in MINIMAL.splitlines(keepends=True)
+    if not line.startswith(("cstf", "etf"))
+)
+
+
+def test_a_path_replaces_cstf_and_etf(tmp_path):
+    path = platdesc.load(write(tmp_path, NO_CHAIN + PATHS))["coresight"]["path"]
+    assert [s["kind"] for s in path] == ["etf", "funnel", "funnel"]
+    assert path[1] == {
+        "kind": "funnel",
+        "base": 0x4000,
+        "ports": 1,
+        "itm_priority": False,
+    }
+    assert path[2]["ports"] == 0x3 and path[2]["itm_priority"] is True  # defaults
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ['kind = "bridge"\nbase = 1\n', 'kind = "etf"\n', "base = 1\n"],
+)
+def test_a_bad_stage_is_rejected(tmp_path, stage):
+    text = NO_CHAIN + "[[coresight.path]]\n" + stage
+    with pytest.raises(platdesc.PlatformError, match=r"path #1 needs kind"):
+        platdesc.load(write(tmp_path, text))
+
+
+def test_an_empty_path_is_rejected(tmp_path):
+    with pytest.raises(platdesc.PlatformError, match="path is empty"):
+        platdesc.load(
+            write(
+                tmp_path, NO_CHAIN.replace("[coresight]\n", "[coresight]\npath = []\n")
+            )
         )
 
 

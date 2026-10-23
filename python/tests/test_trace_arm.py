@@ -161,3 +161,34 @@ def test_a_poll_that_never_succeeds_goes_on_unless_required():
     with pytest.raises(ArmError, match="timed out: 0x00000500"):
         hard = {"op": "poll32", "addr": 0x500, "mask": 1, "tries": 1, "required": True}
         trace_arm.run_chip_steps(regs, [hard], messages.append)
+
+
+def test_poll_with_a_value_waits_for_the_masked_bits_to_equal_it():
+    regs = trace_arm.Regs(FakeProbe({0x500: 0x20000}))
+    assert not regs.poll(0x500, 0x20000, 3, value=0)  # still set
+    regs = trace_arm.Regs(FakeProbe({0x500: 0x1}))
+    assert regs.poll(0x500, 0x20000, 3, value=0)  # the bit is clear
+    assert not regs.poll(0x500, 0x20000, 3)  # without value: any bit set
+
+
+def test_a_poll_step_with_a_value_times_out_when_it_never_matches():
+    regs = trace_arm.Regs(FakeProbe({0x500: 0x20000}))
+    step = {"op": "poll32", "addr": 0x500, "mask": 0x20000, "value": 0, "tries": 2}
+    messages = []
+    trace_arm.run_chip_steps(regs, [step], messages.append)
+    assert "not set after 2 reads, going on" in messages[0]
+    with pytest.raises(ArmError, match="timed out"):
+        trace_arm.run_chip_steps(regs, [dict(step, required=True)], messages.append)
+
+
+def test_the_default_path_programs_the_funnel_before_the_etf(plat):
+    probe = FakeProbe()
+    trace_arm.arm(probe, plat, [Watch("g_x", 4)], log=lambda _m: None)
+    assert order(probe, 0x5C013000) == [0x303]  # ports 0 and 1, hold time 3
+    first = {
+        base: next(
+            i for i, w in enumerate(probe.writes) if base <= w[0] < base + 0x1000
+        )
+        for base in (0x5C013000, 0x5C014000)
+    }
+    assert first[0x5C013000] < first[0x5C014000]

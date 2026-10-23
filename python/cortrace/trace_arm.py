@@ -43,9 +43,12 @@ class Regs:
         """(value & ~clear_bits) | set_bits, like OpenOCD's mmw."""
         self.write(addr, (self.read(addr) & ~clear_bits) | set_bits)
 
-    def poll(self, addr, mask, tries):
-        """Wait until any bit of `mask` is set; False if it never was."""
-        return any(self.read(addr) & mask for _ in range(tries))
+    def poll(self, addr, mask, tries, value=None):
+        """Wait until any bit of `mask` is set, or, if `value` is given, until
+        the bits of `mask` equal it; False if that never happened."""
+        if value is None:
+            return any(self.read(addr) & mask for _ in range(tries))
+        return any(self.read(addr) & mask == value for _ in range(tries))
 
     def unlock(self, base):
         """Unlock a CoreSight block."""
@@ -60,7 +63,9 @@ def run_chip_steps(regs, steps, log):
             regs.write(step["addr"], step["value"])
         elif op == "rmw32":
             regs.rmw(step["addr"], step.get("set", 0), step.get("clear", 0))
-        elif not regs.poll(step["addr"], step["mask"], step.get("tries", 1000)):
+        elif not regs.poll(
+            step["addr"], step["mask"], step.get("tries", 1000), step.get("value")
+        ):
             what = step.get("comment", f"0x{step['addr']:08x}")
             if step.get("required", False):
                 raise ArmError(f"timed out: {what}")
@@ -77,11 +82,16 @@ def arm_tpiu(regs, base, width):
     regs.write(base + 0x304, 0x102)  # FFCR: EnFCont | EnFTC
 
 
-def arm_funnel(regs, base):
-    """Enable the ETM (slave 0) and ITM/DWT (slave 1) inputs; ITM has priority."""
+FUNNEL_HOLD_TIME = 0x3  # CTRL[11:8]: keep a slave's packet together for this long
+
+
+def arm_funnel(regs, base, ports=0x3, itm_priority=True):
+    """Enable the inputs in the `ports` mask (the ETM is slave 0, the ITM/DWT
+    slave 1 on a core's funnel). With `itm_priority`, slave 1 beats slave 0."""
     regs.unlock(base)
-    regs.write(base + 0x000, 0x303)
-    regs.rmw(base + 0x004, set_bits=0x1, clear_bits=0x3F)
+    regs.write(base + 0x000, (FUNNEL_HOLD_TIME << 8) | ports)
+    if itm_priority:
+        regs.rmw(base + 0x004, set_bits=0x1, clear_bits=0x3F)
 
 
 def arm_etf(regs, base):
@@ -164,8 +174,11 @@ def arm(probe, platform, watches, *, width=4, etm=True, log=print):
     regs.rmw(DEMCR, set_bits=DEMCR_TRCENA)
     regs.rmw(blocks["tsgen"] + 0x000, set_bits=0x1)  # CNTCR.EN: timestamps run
     arm_tpiu(regs, blocks["tpiu"], width)
-    arm_funnel(regs, blocks["cstf"])
-    arm_etf(regs, blocks["etf"])
+    for stage in blocks["path"]:
+        if stage["kind"] == "funnel":
+            arm_funnel(regs, stage["base"], stage["ports"], stage["itm_priority"])
+        else:
+            arm_etf(regs, stage["base"])
     if etm:
         arm_etm(regs, blocks["etm"], trace["etm_trace_id"])
     else:

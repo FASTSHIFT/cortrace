@@ -22,7 +22,12 @@ USER_DIR = os.path.join(os.path.expanduser("~"), ".config", "cortrace", "platfor
 SHARE_DIR = "/usr/share/cortrace/platforms"
 SOURCE_DIR = os.path.join(_REPO, "platforms")
 
-BLOCKS = ("etm", "dwt", "itm", "cstf", "etf", "tpiu", "tsgen")
+BLOCKS = ("etm", "dwt", "itm", "tpiu", "tsgen")
+# Between the ETM/ITM and the TPIU: funnels and ETFs. A chip with one funnel and
+# one ETF names them (`cstf`, `etf`); a chip with more lists the stages in
+# `[[coresight.path]]`.
+LEGACY_PATH = ("cstf", "etf")
+STAGE_KINDS = ("funnel", "etf")
 OPS = {"write32": ("addr", "value"), "rmw32": ("addr",), "poll32": ("addr", "mask")}
 
 
@@ -63,6 +68,40 @@ def _check_ops(path, ops):
             )
 
 
+def _stages(path, blocks):
+    """The trace path as a list of stages, in the order they are programmed.
+
+    `[[coresight.path]]` entries have `kind` ("funnel" or "etf") and `base`; a
+    funnel may also have `ports` (bit mask of the inputs to enable, default
+    0x3) and `itm_priority` (give the ITM input priority, default true). Without
+    a `path`, the funnel `cstf` and the ETF `etf` make the two stages.
+    """
+    if "path" not in blocks:
+        return [
+            {
+                "kind": "funnel",
+                "base": blocks["cstf"],
+                "ports": 0x3,
+                "itm_priority": True,
+            },
+            {"kind": "etf", "base": blocks["etf"]},
+        ]
+    stages = []
+    for i, stage in enumerate(blocks["path"], start=1):
+        if stage.get("kind") not in STAGE_KINDS or "base" not in stage:
+            raise PlatformError(
+                f"{path}: coresight.path #{i} needs kind "
+                f"({' or '.join(STAGE_KINDS)}) and base"
+            )
+        stages.append(dict(stage))
+        if stage["kind"] == "funnel":
+            stages[-1].setdefault("ports", 0x3)
+            stages[-1].setdefault("itm_priority", True)
+    if not stages:
+        raise PlatformError(f"{path}: coresight.path is empty")
+    return stages
+
+
 def load(name_or_path):
     """Load a platform by name or by path to its .toml file."""
     path = name_or_path
@@ -82,8 +121,11 @@ def load(name_or_path):
         raise PlatformError(f"{path}: {exc}") from exc
     blocks = data.get("coresight", {})
     missing = [b for b in BLOCKS if b not in blocks]
+    if "path" not in blocks:
+        missing += [b for b in LEGACY_PATH if b not in blocks]
     if missing:
         raise PlatformError(f"{path}: [coresight] lacks {', '.join(missing)}")
+    blocks["path"] = _stages(path, blocks)
     trace = data.setdefault("trace", {})
     trace.setdefault("etm_trace_id", 2)
     trace.setdefault("itm_trace_id", 1)
